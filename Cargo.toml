@@ -3,6 +3,12 @@ name = "anvil-region"
 version = "0.1.0"
 authors = ["vagola <vladislavs.golubs@yandex.ru>"]
 edition = "2018"
+description = "Region file format storage for chunks."
+license = "MIT"
+homepage = "https://github.com/eihwaz/anvil-region"
+repository = "https://github.com/eihwaz/anvil-region"
+keywords = ["minecraft", "anvil", "io"]
+readme = "README.md"
 
 [dependencies]
 byteorder = "1.3"
