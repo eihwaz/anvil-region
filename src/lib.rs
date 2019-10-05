@@ -49,7 +49,7 @@ impl Region {
 
         let region = Region {
             file,
-            chunks_metadata: [Default::default(); REGION_CHUNKS_SIZE],
+            chunks_metadata: [Default::default(); REGION_CHUNKS],
         };
 
         Ok(region)
@@ -59,16 +59,28 @@ impl Region {
 #[cfg(test)]
 mod tests {
     use crate::{Region, REGION_CHUNKS_METADATA_LENGTH};
+    use std::io::Read;
     use tempfile::NamedTempFile;
 
     #[test]
     fn test_empty_header_write() {
-        let file = NamedTempFile::new().unwrap();
+        let mut file = NamedTempFile::new().unwrap();
         let region = Region::new(file.path()).unwrap();
 
         assert_eq!(
             region.file.metadata().unwrap().len(),
             REGION_CHUNKS_METADATA_LENGTH
-        )
+        );
+    }
+
+    #[test]
+    fn test_empty_region_init() {
+        let mut file = NamedTempFile::new().unwrap();
+        let region = Region::new(file.path()).unwrap();
+
+        let mut vec = Vec::new();
+        file.read_to_end(&mut vec).unwrap();
+
+        assert_eq!(vec, include_bytes!("../test/empty_region.mca").to_vec());
     }
 }
