@@ -1,7 +1,6 @@
 use byteorder::{BigEndian, ReadBytesExt};
 use std::fs::{File, OpenOptions};
-use std::io::Error;
-use std::mem;
+use std::io::{Error, Read, Seek, SeekFrom};
 use std::path::Path;
 
 /// Amount of chunks in region.
@@ -9,7 +8,9 @@ const REGION_CHUNKS: usize = 1024;
 /// Length of chunks metadata in region.
 const REGION_CHUNKS_METADATA_LENGTH: usize = 2 * REGION_CHUNKS;
 /// Region header length in bytes.
-const REGION_HEADER_BYTES_LENGTH: u64 = (mem::size_of::<ChunkMetadata>() * REGION_CHUNKS) as u64;
+const REGION_HEADER_BYTES_LENGTH: u64 = 8 * REGION_CHUNKS as u64;
+/// Region sector length in bytes.
+const REGION_SECTOR_BYTES_LENGTH: u16 = 4096;
 
 /// Region represents a 32x32 group of chunks.
 pub struct Region {
@@ -20,19 +21,28 @@ pub struct Region {
 }
 
 /// Chunk metadata are stored in header.
-#[derive(Copy, Clone, Default, Debug)]
+#[derive(Copy, Clone, Default, Debug, Eq, PartialEq)]
 pub struct ChunkMetadata {
-    /// Position offset from file start at which starts chunk data.
-    seek_offset: u32,
+    /// Sector index from which starts chunk data.
+    sector_index: u32,
+    /// Amount of sectors used to store chunk.
+    sectors: u8,
     /// Last time chunk was modified.
     last_modified_timestamp: u32,
 }
 
-/// Compression scheme used for chunk.
-pub enum ChunkCompressionScheme {
-    Gzip = 1,
-    /// In practice, you will only ever encounter chunks compressed using zlib.
-    Zlib = 2,
+impl ChunkMetadata {
+    pub fn new(sector_index: u32, sectors: u8, last_modified_timestamp: u32) -> Self {
+        ChunkMetadata {
+            sector_index,
+            sectors,
+            last_modified_timestamp,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.sectors == 0
+    }
 }
 
 impl Region {
@@ -45,10 +55,10 @@ impl Region {
 
         // If necessary, expand the file length to the length of the header.
         if REGION_HEADER_BYTES_LENGTH > file.metadata()?.len() {
-            file.set_len(REGION_HEADER_BYTES_LENGTH)?
+            file.set_len(REGION_HEADER_BYTES_LENGTH)?;
         }
 
-        let chunks_metadata = Self::read_chunks_metadata(&mut file)?;
+        let chunks_metadata = Self::read_header(&mut file)?;
 
         let region = Region {
             file,
@@ -58,7 +68,7 @@ impl Region {
         Ok(region)
     }
 
-    fn read_chunks_metadata(file: &mut File) -> Result<[ChunkMetadata; REGION_CHUNKS], Error> {
+    fn read_header(file: &mut File) -> Result<[ChunkMetadata; REGION_CHUNKS], Error> {
         let mut chunks_metadata = [Default::default(); REGION_CHUNKS];
         let mut values = [0u32; REGION_CHUNKS_METADATA_LENGTH];
 
@@ -67,11 +77,15 @@ impl Region {
         }
 
         for index in 0..REGION_CHUNKS {
-            let seek_offset = values[index];
             let last_modified_timestamp = values[REGION_CHUNKS + index];
+            let offset = values[index];
+
+            let sector_index = offset >> 8;
+            let sectors = (offset & 0xFF) as u8;
 
             let metadata = ChunkMetadata {
-                seek_offset,
+                sector_index,
+                sectors,
                 last_modified_timestamp,
             };
 
@@ -80,12 +94,42 @@ impl Region {
 
         return Ok(chunks_metadata);
     }
+
+    fn read_chunk(&mut self, x: u8, z: u8) -> Result<Vec<u8>, Error> {
+        assert!(32 > x, "Region chunk x coordinate out of bounds");
+        assert!(32 > z, "Region chunk y coordinate out of bounds");
+
+        let metadata = self.get_metadata(x, z);
+        let seek_offset = metadata.sector_index as u64 * REGION_SECTOR_BYTES_LENGTH as u64;
+
+        self.file.seek(SeekFrom::Start(seek_offset))?;
+
+        let maximum_length = metadata.sectors as u32 * REGION_SECTOR_BYTES_LENGTH as u32;
+        let length = self.file.read_u32::<BigEndian>()?;
+
+        assert!(
+            maximum_length >= length,
+            "Chunk of length {} exceeds maximum {}",
+            length,
+            maximum_length
+        );
+
+        let compression_scheme = self.file.read_u8()?;
+
+        let mut buf = vec![0u8; (length - 1) as usize];
+        self.file.read_exact(&mut buf);
+
+        Ok(buf)
+    }
+
+    fn get_metadata(&self, x: u8, z: u8) -> ChunkMetadata {
+        self.chunks_metadata[(x + z) as usize * 32]
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{Region, REGION_HEADER_BYTES_LENGTH};
-    use std::fs::File;
+    use crate::{ChunkMetadata, Region, REGION_HEADER_BYTES_LENGTH};
     use std::io::Read;
     use std::path::Path;
     use tempfile::NamedTempFile;
@@ -111,18 +155,18 @@ mod tests {
     }
 
     #[test]
-    fn test_chunk_metadata_read() {
+    fn test_header_read() {
         let expected_data = vec![
-            (177153u32, 1570215596u32),
-            (197633, 1570215597),
-            (224001, 1570215597),
-            (253697, 1570215597),
-            (178177, 1570215596),
-            (203521, 1570215597),
-            (71937, 1570215597),
-            (260609, 1570215597),
-            (188161, 1570215596),
-            (207873, 1570215597),
+            ChunkMetadata::new(692, 1, 1570215596),
+            ChunkMetadata::new(772, 1, 1570215597),
+            ChunkMetadata::new(875, 1, 1570215597),
+            ChunkMetadata::new(991, 1, 1570215597),
+            ChunkMetadata::new(696, 1, 1570215596),
+            ChunkMetadata::new(795, 1, 1570215597),
+            ChunkMetadata::new(281, 1, 1570215597),
+            ChunkMetadata::new(1018, 1, 1570215597),
+            ChunkMetadata::new(735, 1, 1570215596),
+            ChunkMetadata::new(812, 1, 1570215597),
         ];
 
         let path = Path::new("./test/region.mca");
@@ -130,11 +174,10 @@ mod tests {
 
         let region = Region::new(path).unwrap();
 
-        for (index, (seek_offset, last_modified_timestamp)) in expected_data.iter().enumerate() {
-            let metadata = region.chunks_metadata[256 + index];
+        for (index, expected_chunk_metadata) in expected_data.iter().enumerate() {
+            let chunk_metadata = region.chunks_metadata[256 + index];
 
-            assert_eq!(metadata.seek_offset, *seek_offset);
-            assert_eq!(metadata.last_modified_timestamp, *last_modified_timestamp);
+            assert_eq!(&chunk_metadata, expected_chunk_metadata);
         }
     }
 
