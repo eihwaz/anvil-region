@@ -1,6 +1,7 @@
 use byteorder::{BigEndian, ReadBytesExt};
+use flate2::read;
 use std::fs::{File, OpenOptions};
-use std::io::{Error, Read, Seek, SeekFrom};
+use std::io::{Cursor, Error, Read, Seek, SeekFrom};
 use std::path::Path;
 
 /// Amount of chunks in region.
@@ -95,13 +96,17 @@ impl Region {
         return Ok(chunks_metadata);
     }
 
-    fn read_chunk(&mut self, x: u8, z: u8) -> Result<Vec<u8>, Error> {
+    pub fn read_chunk_data(&mut self, x: u8, z: u8) -> Result<Vec<u8>, Error> {
         assert!(32 > x, "Region chunk x coordinate out of bounds");
         assert!(32 > z, "Region chunk y coordinate out of bounds");
 
         let metadata = self.get_metadata(x, z);
-        let seek_offset = metadata.sector_index as u64 * REGION_SECTOR_BYTES_LENGTH as u64;
 
+        if metadata.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let seek_offset = metadata.sector_index as u64 * REGION_SECTOR_BYTES_LENGTH as u64;
         self.file.seek(SeekFrom::Start(seek_offset))?;
 
         let maximum_length = metadata.sectors as u32 * REGION_SECTOR_BYTES_LENGTH as u32;
@@ -115,11 +120,26 @@ impl Region {
         );
 
         let compression_scheme = self.file.read_u8()?;
+        let mut compressed_buffer = vec![0u8; (length - 1) as usize];
+        self.file.read_exact(&mut compressed_buffer)?;
 
-        let mut buf = vec![0u8; (length - 1) as usize];
-        self.file.read_exact(&mut buf);
+        let cursor = Cursor::new(&compressed_buffer);
+        let mut buffer = Vec::new();
 
-        Ok(buf)
+        match compression_scheme {
+            1 => {
+                read::GzDecoder::new(cursor).read_to_end(&mut buffer)?;
+            }
+            2 => {
+                read::ZlibDecoder::new(cursor).read_to_end(&mut buffer)?;
+            }
+            _ => panic!(
+                "Unsupported compression scheme of type {}",
+                compression_scheme
+            ),
+        }
+
+        Ok(buffer)
     }
 
     fn get_metadata(&self, x: u8, z: u8) -> ChunkMetadata {
@@ -179,6 +199,28 @@ mod tests {
 
             assert_eq!(&chunk_metadata, expected_chunk_metadata);
         }
+    }
+
+    #[test]
+    fn test_read_chunk_data_existing() {
+        let path = Path::new("./test/region.mca");
+        assert!(path.exists());
+
+        let mut region = Region::new(path).unwrap();
+        let vec = region.read_chunk_data(4, 4).unwrap();
+
+        assert_eq!(vec.len(), 28061);
+    }
+
+    #[test]
+    fn test_read_chunk_data_empty() {
+        let path = Path::new("./test/empty_region.mca");
+        assert!(path.exists());
+
+        let mut region = Region::new(path).unwrap();
+        let vec = region.read_chunk_data(0, 0).unwrap();
+
+        assert_eq!(vec.len(), 0);
     }
 
 }
