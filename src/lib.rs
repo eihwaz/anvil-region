@@ -1,5 +1,6 @@
 use byteorder::{BigEndian, ReadBytesExt};
 use flate2::read;
+use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{Cursor, Error, Read, Seek, SeekFrom};
 use std::path::Path;
@@ -13,17 +14,71 @@ const REGION_HEADER_BYTES_LENGTH: u64 = 8 * REGION_CHUNKS as u64;
 /// Region sector length in bytes.
 const REGION_SECTOR_BYTES_LENGTH: u16 = 4096;
 
+pub struct AnvilChunk {
+    pub x: i32,
+    pub z: i32,
+}
+
+pub struct AnvilChunkProvider<P> {
+    /// Folder where region files located.
+    folder: P,
+}
+
+impl<P: AsRef<Path>> AnvilChunkProvider<P> {
+    pub fn new(folder: P) -> Self {
+        AnvilChunkProvider { folder }
+    }
+
+    pub fn read_chunk(&self, chunk_x: i32, chunk_z: i32) -> Result<Option<AnvilChunk>, Error> {
+        let region_x = chunk_x >> 5;
+        let region_z = chunk_z >> 5;
+
+        let region_chunk_x = (chunk_x & 31) as u8;
+        let region_chunk_z = (chunk_z & 31) as u8;
+
+        let region_name = format!("r.{}.{}.mca", region_x, region_z);
+        let region_path = self.folder.as_ref().join(region_name);
+
+        if !region_path.exists() {
+            return Ok(None);
+        }
+
+        // TODO: Cache region files.
+        let mut region = AnvilRegion::new(region_path)?;
+        let chunk_data = region.read_chunk_data(region_chunk_x, region_chunk_z)?;
+
+        if chunk_data.is_empty() {
+            return Ok(None);
+        }
+
+        Ok(Some(AnvilChunk {
+            x: chunk_x,
+            z: chunk_z,
+        }))
+    }
+
+    pub fn write_chunk(&self, chunk: AnvilChunk) -> Result<(), Error> {
+        let folder_ref = self.folder.as_ref();
+
+        if !folder_ref.exists() {
+            fs::create_dir(folder_ref);
+        }
+
+        Ok(())
+    }
+}
+
 /// Region represents a 32x32 group of chunks.
-pub struct Region {
+struct AnvilRegion {
     /// File in which region are stored.
     file: File,
     /// Array of chunks metadata.
-    chunks_metadata: [ChunkMetadata; REGION_CHUNKS],
+    chunks_metadata: [AnvilChunkMetadata; REGION_CHUNKS],
 }
 
 /// Chunk metadata are stored in header.
 #[derive(Copy, Clone, Default, Debug, Eq, PartialEq)]
-pub struct ChunkMetadata {
+struct AnvilChunkMetadata {
     /// Sector index from which starts chunk data.
     sector_index: u32,
     /// Amount of sectors used to store chunk.
@@ -32,22 +87,22 @@ pub struct ChunkMetadata {
     last_modified_timestamp: u32,
 }
 
-impl ChunkMetadata {
-    pub fn new(sector_index: u32, sectors: u8, last_modified_timestamp: u32) -> Self {
-        ChunkMetadata {
+impl AnvilChunkMetadata {
+    fn new(sector_index: u32, sectors: u8, last_modified_timestamp: u32) -> Self {
+        AnvilChunkMetadata {
             sector_index,
             sectors,
             last_modified_timestamp,
         }
     }
 
-    pub fn is_empty(&self) -> bool {
+    fn is_empty(&self) -> bool {
         self.sectors == 0
     }
 }
 
-impl Region {
-    pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
+impl AnvilRegion {
+    fn new<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
         let mut file = OpenOptions::new()
             .write(true)
             .read(true)
@@ -61,7 +116,7 @@ impl Region {
 
         let chunks_metadata = Self::read_header(&mut file)?;
 
-        let region = Region {
+        let region = AnvilRegion {
             file,
             chunks_metadata,
         };
@@ -69,7 +124,7 @@ impl Region {
         Ok(region)
     }
 
-    fn read_header(file: &mut File) -> Result<[ChunkMetadata; REGION_CHUNKS], Error> {
+    fn read_header(file: &mut File) -> Result<[AnvilChunkMetadata; REGION_CHUNKS], Error> {
         let mut chunks_metadata = [Default::default(); REGION_CHUNKS];
         let mut values = [0u32; REGION_CHUNKS_METADATA_LENGTH];
 
@@ -84,7 +139,7 @@ impl Region {
             let sector_index = offset >> 8;
             let sectors = (offset & 0xFF) as u8;
 
-            let metadata = ChunkMetadata {
+            let metadata = AnvilChunkMetadata {
                 sector_index,
                 sectors,
                 last_modified_timestamp,
@@ -96,7 +151,7 @@ impl Region {
         return Ok(chunks_metadata);
     }
 
-    pub fn read_chunk_data(&mut self, x: u8, z: u8) -> Result<Vec<u8>, Error> {
+    fn read_chunk_data(&mut self, x: u8, z: u8) -> Result<Vec<u8>, Error> {
         assert!(32 > x, "Region chunk x coordinate out of bounds");
         assert!(32 > z, "Region chunk y coordinate out of bounds");
 
@@ -142,14 +197,14 @@ impl Region {
         Ok(buffer)
     }
 
-    fn get_metadata(&self, x: u8, z: u8) -> ChunkMetadata {
+    fn get_metadata(&self, x: u8, z: u8) -> AnvilChunkMetadata {
         self.chunks_metadata[(x + z) as usize * 32]
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{ChunkMetadata, Region, REGION_HEADER_BYTES_LENGTH};
+    use crate::{AnvilChunkMetadata, AnvilChunkProvider, AnvilRegion, REGION_HEADER_BYTES_LENGTH};
     use std::io::Read;
     use std::path::Path;
     use tempfile::NamedTempFile;
@@ -157,7 +212,7 @@ mod tests {
     #[test]
     fn test_empty_header_write() {
         let mut file = NamedTempFile::new().unwrap();
-        let region = Region::new(file.path()).unwrap();
+        let region = AnvilRegion::new(file.path()).unwrap();
         let file_length = region.file.metadata().unwrap().len();
 
         assert_eq!(file_length, REGION_HEADER_BYTES_LENGTH);
@@ -166,7 +221,7 @@ mod tests {
     #[test]
     fn test_empty_region_init() {
         let mut file = NamedTempFile::new().unwrap();
-        let region = Region::new(file.path()).unwrap();
+        let region = AnvilRegion::new(file.path()).unwrap();
 
         let mut vec = Vec::new();
         file.read_to_end(&mut vec).unwrap();
@@ -177,22 +232,22 @@ mod tests {
     #[test]
     fn test_header_read() {
         let expected_data = vec![
-            ChunkMetadata::new(692, 1, 1570215596),
-            ChunkMetadata::new(772, 1, 1570215597),
-            ChunkMetadata::new(875, 1, 1570215597),
-            ChunkMetadata::new(991, 1, 1570215597),
-            ChunkMetadata::new(696, 1, 1570215596),
-            ChunkMetadata::new(795, 1, 1570215597),
-            ChunkMetadata::new(281, 1, 1570215597),
-            ChunkMetadata::new(1018, 1, 1570215597),
-            ChunkMetadata::new(735, 1, 1570215596),
-            ChunkMetadata::new(812, 1, 1570215597),
+            AnvilChunkMetadata::new(692, 1, 1570215596),
+            AnvilChunkMetadata::new(772, 1, 1570215597),
+            AnvilChunkMetadata::new(875, 1, 1570215597),
+            AnvilChunkMetadata::new(991, 1, 1570215597),
+            AnvilChunkMetadata::new(696, 1, 1570215596),
+            AnvilChunkMetadata::new(795, 1, 1570215597),
+            AnvilChunkMetadata::new(281, 1, 1570215597),
+            AnvilChunkMetadata::new(1018, 1, 1570215597),
+            AnvilChunkMetadata::new(735, 1, 1570215596),
+            AnvilChunkMetadata::new(812, 1, 1570215597),
         ];
 
         let path = Path::new("./test/region.mca");
         assert!(path.exists());
 
-        let region = Region::new(path).unwrap();
+        let region = AnvilRegion::new(path).unwrap();
 
         for (index, expected_chunk_metadata) in expected_data.iter().enumerate() {
             let chunk_metadata = region.chunks_metadata[256 + index];
@@ -206,7 +261,7 @@ mod tests {
         let path = Path::new("./test/region.mca");
         assert!(path.exists());
 
-        let mut region = Region::new(path).unwrap();
+        let mut region = AnvilRegion::new(path).unwrap();
         let vec = region.read_chunk_data(4, 4).unwrap();
 
         assert_eq!(vec.len(), 28061);
@@ -217,10 +272,18 @@ mod tests {
         let path = Path::new("./test/empty_region.mca");
         assert!(path.exists());
 
-        let mut region = Region::new(path).unwrap();
+        let mut region = AnvilRegion::new(path).unwrap();
         let vec = region.read_chunk_data(0, 0).unwrap();
 
         assert_eq!(vec.len(), 0);
+    }
+
+    #[test]
+    fn test_read_empty_chunk() {
+        let chunk_provider = AnvilChunkProvider::new("region");
+        let chunk = chunk_provider.read_chunk(4, 4).unwrap();
+
+        assert!(chunk.is_none());
     }
 
 }
