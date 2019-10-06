@@ -244,7 +244,7 @@ mod tests {
             AnvilChunkMetadata::new(812, 1, 1570215597),
         ];
 
-        let path = Path::new("./test/region.mca");
+        let path = Path::new("test/region.mca");
         assert!(path.exists());
 
         let region = AnvilRegion::new(path).unwrap();
@@ -258,7 +258,7 @@ mod tests {
 
     #[test]
     fn test_read_chunk_data_existing() {
-        let path = Path::new("./test/region.mca");
+        let path = Path::new("test/region.mca");
         assert!(path.exists());
 
         let mut region = AnvilRegion::new(path).unwrap();
@@ -269,7 +269,7 @@ mod tests {
 
     #[test]
     fn test_read_chunk_data_empty() {
-        let path = Path::new("./test/empty_region.mca");
+        let path = Path::new("test/empty_region.mca");
         assert!(path.exists());
 
         let mut region = AnvilRegion::new(path).unwrap();
@@ -279,9 +279,25 @@ mod tests {
     }
 
     #[test]
-    fn test_read_empty_chunk() {
-        let chunk_provider = AnvilChunkProvider::new("region");
+    fn test_read_chunk_no_folder() {
+        let chunk_provider = AnvilChunkProvider::new("no-folder");
         let chunk = chunk_provider.read_chunk(4, 4).unwrap();
+
+        assert!(chunk.is_none());
+    }
+
+    #[test]
+    fn test_read_chunk_no_region() {
+        let chunk_provider = AnvilChunkProvider::new("test/region");
+        let chunk = chunk_provider.read_chunk(100, 100).unwrap();
+
+        assert!(chunk.is_none());
+    }
+
+    #[test]
+    fn test_read_chunk_no_chunk() {
+        let chunk_provider = AnvilChunkProvider::new("test/region");
+        let chunk = chunk_provider.read_chunk(22, 0).unwrap();
 
         assert!(chunk.is_none());
     }
