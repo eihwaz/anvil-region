@@ -12,7 +12,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-anvil-region = "0.1"
+anvil-region = "0.2"
 ```
 
 ## Example
