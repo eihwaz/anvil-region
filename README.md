@@ -14,3 +14,17 @@ Add this to your `Cargo.toml`:
 [dependencies]
 anvil-region = "0.1"
 ```
+
+## Example
+
+```rust
+use anvil_region::AnvilChunkProvider;
+
+let chunk_provider = AnvilChunkProvider::new("test/region");
+
+let chunk_compound_tag = chunk_provider.load_chunk(4, 2).unwrap();
+let level_tag = chunk_compound_tag.get_compound_tag("Level").unwrap();
+
+assert_eq!(level_tag.get_i32("xPos").unwrap(), 4);
+assert_eq!(level_tag.get_i32("zPos").unwrap(), 2);
+```

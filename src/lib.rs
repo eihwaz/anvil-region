@@ -1,3 +1,20 @@
+//! Region file format storage for chunks.
+//!
+//! More information about format can be found https://wiki.vg/Region_Files.
+//!
+//! # Example
+//!
+//! ```
+//! use anvil_region::AnvilChunkProvider;
+//!
+//! let chunk_provider = AnvilChunkProvider::new("test/region");
+//!
+//! let chunk_compound_tag = chunk_provider.load_chunk(4, 2).unwrap();
+//! let level_tag = chunk_compound_tag.get_compound_tag("Level").unwrap();
+//!
+//! assert_eq!(level_tag.get_i32("xPos").unwrap(), 4);
+//! assert_eq!(level_tag.get_i32("zPos").unwrap(), 2);
+//! ```
 use byteorder::{BigEndian, ReadBytesExt};
 use nbt::decode::TagDecodeError;
 use nbt::decode::{read_gzip_compound_tag, read_zlib_compound_tag};
@@ -226,7 +243,7 @@ impl AnvilRegion {
         assert!(32 > x, "Region chunk x coordinate out of bounds");
         assert!(32 > z, "Region chunk y coordinate out of bounds");
 
-        self.chunks_metadata[(x + z) as usize * 32]
+        self.chunks_metadata[x as usize + z as usize * 32]
     }
 }
 
@@ -263,19 +280,14 @@ mod tests {
     #[test]
     fn test_header_read() {
         let expected_data = vec![
-            AnvilChunkMetadata::new(692, 1, 1570215596),
-            AnvilChunkMetadata::new(772, 1, 1570215597),
-            AnvilChunkMetadata::new(875, 1, 1570215597),
-            AnvilChunkMetadata::new(991, 1, 1570215597),
-            AnvilChunkMetadata::new(696, 1, 1570215596),
-            AnvilChunkMetadata::new(795, 1, 1570215597),
-            AnvilChunkMetadata::new(281, 1, 1570215597),
-            AnvilChunkMetadata::new(1018, 1, 1570215597),
-            AnvilChunkMetadata::new(735, 1, 1570215596),
-            AnvilChunkMetadata::new(812, 1, 1570215597),
+            AnvilChunkMetadata::new(61, 2, 1570215508),
+            AnvilChunkMetadata::new(102, 2, 1570215511),
+            AnvilChunkMetadata::new(177, 2, 1570215515),
+            AnvilChunkMetadata::new(265, 2, 1570215519),
+            AnvilChunkMetadata::new(56, 2, 1570215508),
         ];
 
-        let path = Path::new("test/region.mca");
+        let path = Path::new("test/region/r.0.0.mca");
         assert!(path.exists());
 
         let region = AnvilRegion::new(path).unwrap();
@@ -289,15 +301,15 @@ mod tests {
 
     #[test]
     fn test_read_chunk_data() {
-        let path = Path::new("test/region.mca");
+        let path = Path::new("test/region/r.0.0.mca");
         assert!(path.exists());
 
         let mut region = AnvilRegion::new(path).unwrap();
-        let compound_tag = region.read_chunk(4, 4).unwrap();
+        let compound_tag = region.read_chunk(15, 3).unwrap();
         let level_tag = compound_tag.get_compound_tag("Level").unwrap();
 
-        assert_eq!(level_tag.get_i32("xPos").unwrap(), 0);
-        assert_eq!(level_tag.get_i32("zPos").unwrap(), -24);
+        assert_eq!(level_tag.get_i32("xPos").unwrap(), 15);
+        assert_eq!(level_tag.get_i32("zPos").unwrap(), 3);
     }
 
     #[test]
@@ -348,12 +360,12 @@ mod tests {
     #[test]
     fn test_load_chunk_chunk_not_found() {
         let chunk_provider = AnvilChunkProvider::new("test/region");
-        let load_error = chunk_provider.load_chunk(22, 0).err().unwrap();
+        let load_error = chunk_provider.load_chunk(15, 14).err().unwrap();
 
         match load_error {
             ChunkLoadError::ChunkNotFound { chunk_x, chunk_z } => {
-                assert_eq!(chunk_x, 22);
-                assert_eq!(chunk_z, 0);
+                assert_eq!(chunk_x, 15);
+                assert_eq!(chunk_z, 14);
             }
             _ => panic!("Expected `ChunkNotFound` but got `{:?}", load_error),
         }
