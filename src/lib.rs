@@ -1,9 +1,11 @@
 use byteorder::{BigEndian, ReadBytesExt};
-use flate2::read;
-use std::fs;
+use nbt::decode::TagDecodeError;
+use nbt::decode::{read_gzip_compound_tag, read_zlib_compound_tag};
+use nbt::CompoundTag;
 use std::fs::{File, OpenOptions};
-use std::io::{Cursor, Error, Read, Seek, SeekFrom};
+use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
+use std::{fs, io};
 
 /// Amount of chunks in region.
 const REGION_CHUNKS: usize = 1024;
@@ -14,9 +16,53 @@ const REGION_HEADER_BYTES_LENGTH: u64 = 8 * REGION_CHUNKS as u64;
 /// Region sector length in bytes.
 const REGION_SECTOR_BYTES_LENGTH: u16 = 4096;
 
-pub struct AnvilChunk {
-    pub x: i32,
-    pub z: i32,
+/// Possible errors while loading the chunk.
+#[derive(Debug)]
+pub enum ChunkLoadError {
+    /// Region at specified coordinates not found.
+    RegionNotFound { region_x: i32, region_z: i32 },
+    /// Chunk at specified coordinates inside region not found.
+    ChunkNotFound { chunk_x: u8, chunk_z: u8 },
+    /// Chunk length overlaps declared maximum.
+    ///
+    /// This should not occur under normal conditions.
+    ///
+    /// Region file are corrupted.
+    LengthExceedsMaximum {
+        /// Chunk length.
+        length: u32,
+        /// Chunk maximum expected length.
+        maximum_length: u32,
+    },
+    /// Currently are only 2 types of compression: Gzip and Zlib.
+    ///
+    /// This should not occur under normal conditions.
+    ///
+    /// Region file are corrupted or was introduced new compression type.
+    UnsupportedCompressionScheme {
+        /// Compression scheme type id.
+        compression_scheme: u8,
+    },
+    /// I/O Error which happened while were reading chunk data from region file.
+    ReadError { io_error: io::Error },
+    /// Error while decoding binary data to NBT tag.
+    ///
+    /// This should not occur under normal conditions.
+    ///
+    /// Region file are corrupted or a developer error the NBT library.
+    TagDecodeError { tag_decode_error: TagDecodeError },
+}
+
+impl From<io::Error> for ChunkLoadError {
+    fn from(io_error: io::Error) -> Self {
+        ChunkLoadError::ReadError { io_error }
+    }
+}
+
+impl From<TagDecodeError> for ChunkLoadError {
+    fn from(tag_decode_error: TagDecodeError) -> Self {
+        ChunkLoadError::TagDecodeError { tag_decode_error }
+    }
 }
 
 pub struct AnvilChunkProvider<P> {
@@ -29,7 +75,7 @@ impl<P: AsRef<Path>> AnvilChunkProvider<P> {
         AnvilChunkProvider { folder }
     }
 
-    pub fn read_chunk(&self, chunk_x: i32, chunk_z: i32) -> Result<Option<AnvilChunk>, Error> {
+    pub fn load_chunk(&self, chunk_x: i32, chunk_z: i32) -> Result<CompoundTag, ChunkLoadError> {
         let region_x = chunk_x >> 5;
         let region_z = chunk_z >> 5;
 
@@ -40,28 +86,20 @@ impl<P: AsRef<Path>> AnvilChunkProvider<P> {
         let region_path = self.folder.as_ref().join(region_name);
 
         if !region_path.exists() {
-            return Ok(None);
+            return Err(ChunkLoadError::RegionNotFound { region_x, region_z });
         }
 
         // TODO: Cache region files.
         let mut region = AnvilRegion::new(region_path)?;
-        let chunk_data = region.read_chunk_data(region_chunk_x, region_chunk_z)?;
 
-        if chunk_data.is_empty() {
-            return Ok(None);
-        }
-
-        Ok(Some(AnvilChunk {
-            x: chunk_x,
-            z: chunk_z,
-        }))
+        region.read_chunk(region_chunk_x, region_chunk_z)
     }
 
-    pub fn write_chunk(&self, chunk: AnvilChunk) -> Result<(), Error> {
+    pub fn save_chunk(&self, chunk_compound_tag: CompoundTag) -> Result<(), io::Error> {
         let folder_ref = self.folder.as_ref();
 
         if !folder_ref.exists() {
-            fs::create_dir(folder_ref);
+            fs::create_dir(folder_ref)?;
         }
 
         Ok(())
@@ -102,7 +140,7 @@ impl AnvilChunkMetadata {
 }
 
 impl AnvilRegion {
-    fn new<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
+    fn new<P: AsRef<Path>>(path: P) -> Result<Self, io::Error> {
         let mut file = OpenOptions::new()
             .write(true)
             .read(true)
@@ -124,7 +162,7 @@ impl AnvilRegion {
         Ok(region)
     }
 
-    fn read_header(file: &mut File) -> Result<[AnvilChunkMetadata; REGION_CHUNKS], Error> {
+    fn read_header(file: &mut File) -> Result<[AnvilChunkMetadata; REGION_CHUNKS], io::Error> {
         let mut chunks_metadata = [Default::default(); REGION_CHUNKS];
         let mut values = [0u32; REGION_CHUNKS_METADATA_LENGTH];
 
@@ -151,60 +189,53 @@ impl AnvilRegion {
         return Ok(chunks_metadata);
     }
 
-    fn read_chunk_data(&mut self, x: u8, z: u8) -> Result<Vec<u8>, Error> {
-        assert!(32 > x, "Region chunk x coordinate out of bounds");
-        assert!(32 > z, "Region chunk y coordinate out of bounds");
-
-        let metadata = self.get_metadata(x, z);
+    fn read_chunk(&mut self, chunk_x: u8, chunk_z: u8) -> Result<CompoundTag, ChunkLoadError> {
+        let metadata = self.get_metadata(chunk_x, chunk_z);
 
         if metadata.is_empty() {
-            return Ok(Vec::new());
+            return Err(ChunkLoadError::ChunkNotFound { chunk_x, chunk_z });
         }
 
         let seek_offset = metadata.sector_index as u64 * REGION_SECTOR_BYTES_LENGTH as u64;
-        self.file.seek(SeekFrom::Start(seek_offset))?;
-
         let maximum_length = metadata.sectors as u32 * REGION_SECTOR_BYTES_LENGTH as u32;
+
+        self.file.seek(SeekFrom::Start(seek_offset))?;
         let length = self.file.read_u32::<BigEndian>()?;
 
-        assert!(
-            maximum_length >= length,
-            "Chunk of length {} exceeds maximum {}",
-            length,
-            maximum_length
-        );
+        if length > maximum_length {
+            return Err(ChunkLoadError::LengthExceedsMaximum {
+                length,
+                maximum_length,
+            });
+        }
 
         let compression_scheme = self.file.read_u8()?;
         let mut compressed_buffer = vec![0u8; (length - 1) as usize];
         self.file.read_exact(&mut compressed_buffer)?;
 
-        let cursor = Cursor::new(&compressed_buffer);
-        let mut buffer = Vec::new();
+        let mut cursor = Cursor::new(&compressed_buffer);
 
         match compression_scheme {
-            1 => {
-                read::GzDecoder::new(cursor).read_to_end(&mut buffer)?;
-            }
-            2 => {
-                read::ZlibDecoder::new(cursor).read_to_end(&mut buffer)?;
-            }
-            _ => panic!(
-                "Unsupported compression scheme of type {}",
-                compression_scheme
-            ),
+            1 => Ok(read_gzip_compound_tag(&mut cursor)?),
+            2 => Ok(read_zlib_compound_tag(&mut cursor)?),
+            _ => Err(ChunkLoadError::UnsupportedCompressionScheme { compression_scheme }),
         }
-
-        Ok(buffer)
     }
 
     fn get_metadata(&self, x: u8, z: u8) -> AnvilChunkMetadata {
+        assert!(32 > x, "Region chunk x coordinate out of bounds");
+        assert!(32 > z, "Region chunk y coordinate out of bounds");
+
         self.chunks_metadata[(x + z) as usize * 32]
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{AnvilChunkMetadata, AnvilChunkProvider, AnvilRegion, REGION_HEADER_BYTES_LENGTH};
+    use crate::{
+        AnvilChunkMetadata, AnvilChunkProvider, AnvilRegion, ChunkLoadError,
+        REGION_HEADER_BYTES_LENGTH,
+    };
     use std::io::Read;
     use std::path::Path;
     use tempfile::NamedTempFile;
@@ -257,49 +288,75 @@ mod tests {
     }
 
     #[test]
-    fn test_read_chunk_data_existing() {
+    fn test_read_chunk_data() {
         let path = Path::new("test/region.mca");
         assert!(path.exists());
 
         let mut region = AnvilRegion::new(path).unwrap();
-        let vec = region.read_chunk_data(4, 4).unwrap();
+        let compound_tag = region.read_chunk(4, 4).unwrap();
+        let level_tag = compound_tag.get_compound_tag("Level").unwrap();
 
-        assert_eq!(vec.len(), 28061);
+        assert_eq!(level_tag.get_i32("xPos").unwrap(), 0);
+        assert_eq!(level_tag.get_i32("zPos").unwrap(), -24);
     }
 
     #[test]
-    fn test_read_chunk_data_empty() {
+    fn test_read_chunk_empty() {
         let path = Path::new("test/empty_region.mca");
         assert!(path.exists());
 
         let mut region = AnvilRegion::new(path).unwrap();
-        let vec = region.read_chunk_data(0, 0).unwrap();
+        let load_error = region.read_chunk(0, 0).err().unwrap();
 
-        assert_eq!(vec.len(), 0);
+        match load_error {
+            ChunkLoadError::ChunkNotFound { chunk_x, chunk_z } => {
+                assert_eq!(chunk_x, 0);
+                assert_eq!(chunk_z, 0);
+            }
+            _ => panic!("Expected `ChunkNotFound` but got `{:?}`", load_error),
+        }
     }
 
     #[test]
-    fn test_read_chunk_no_folder() {
+    fn test_load_chunk_no_folder() {
         let chunk_provider = AnvilChunkProvider::new("no-folder");
-        let chunk = chunk_provider.read_chunk(4, 4).unwrap();
+        let load_error = chunk_provider.load_chunk(4, 4).err().unwrap();
 
-        assert!(chunk.is_none());
+        match load_error {
+            ChunkLoadError::RegionNotFound { region_x, region_z } => {
+                assert_eq!(region_x, 0);
+                assert_eq!(region_z, 0);
+            }
+            _ => panic!("Expected `RegionNotFound` but got `{:?}", load_error),
+        }
     }
 
     #[test]
-    fn test_read_chunk_no_region() {
+    fn test_load_chunk_no_region() {
         let chunk_provider = AnvilChunkProvider::new("test/region");
-        let chunk = chunk_provider.read_chunk(100, 100).unwrap();
+        let load_error = chunk_provider.load_chunk(100, 100).err().unwrap();
 
-        assert!(chunk.is_none());
+        match load_error {
+            ChunkLoadError::RegionNotFound { region_x, region_z } => {
+                assert_eq!(region_x, 3);
+                assert_eq!(region_z, 3);
+            }
+            _ => panic!("Expected `RegionNotFound` but got `{:?}", load_error),
+        }
     }
 
     #[test]
-    fn test_read_chunk_no_chunk() {
+    fn test_load_chunk_chunk_not_found() {
         let chunk_provider = AnvilChunkProvider::new("test/region");
-        let chunk = chunk_provider.read_chunk(22, 0).unwrap();
+        let load_error = chunk_provider.load_chunk(22, 0).err().unwrap();
 
-        assert!(chunk.is_none());
+        match load_error {
+            ChunkLoadError::ChunkNotFound { chunk_x, chunk_z } => {
+                assert_eq!(chunk_x, 22);
+                assert_eq!(chunk_z, 0);
+            }
+            _ => panic!("Expected `ChunkNotFound` but got `{:?}", load_error),
+        }
     }
 
 }
