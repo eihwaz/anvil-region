@@ -49,7 +49,7 @@ pub enum ChunkLoadError {
     ///
     /// This should not occur under normal conditions.
     ///
-    /// Region file are corrupted or a developer error the NBT library.
+    /// Region file are corrupted or a developer error in the NBT library.
     TagDecodeError { tag_decode_error: TagDecodeError },
 }
 
