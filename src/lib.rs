@@ -82,14 +82,16 @@ impl From<TagDecodeError> for ChunkLoadError {
     }
 }
 
-pub struct AnvilChunkProvider<P> {
+pub struct AnvilChunkProvider<'a> {
     /// Folder where region files located.
-    folder: P,
+    folder_path: &'a Path,
 }
 
-impl<P: AsRef<Path>> AnvilChunkProvider<P> {
-    pub fn new(folder: P) -> Self {
-        AnvilChunkProvider { folder }
+impl<'a> AnvilChunkProvider<'a> {
+    pub fn new(folder: &'a str) -> Self {
+        let folder_path = Path::new(folder);
+
+        AnvilChunkProvider { folder_path }
     }
 
     pub fn load_chunk(&self, chunk_x: i32, chunk_z: i32) -> Result<CompoundTag, ChunkLoadError> {
@@ -100,7 +102,7 @@ impl<P: AsRef<Path>> AnvilChunkProvider<P> {
         let region_chunk_z = (chunk_z & 31) as u8;
 
         let region_name = format!("r.{}.{}.mca", region_x, region_z);
-        let region_path = self.folder.as_ref().join(region_name);
+        let region_path = self.folder_path.join(region_name);
 
         if !region_path.exists() {
             return Err(ChunkLoadError::RegionNotFound { region_x, region_z });
@@ -113,10 +115,8 @@ impl<P: AsRef<Path>> AnvilChunkProvider<P> {
     }
 
     pub fn save_chunk(&self, chunk_compound_tag: CompoundTag) -> Result<(), io::Error> {
-        let folder_ref = self.folder.as_ref();
-
-        if !folder_ref.exists() {
-            fs::create_dir(folder_ref)?;
+        if !self.folder_path.exists() {
+            fs::create_dir(self.folder_path)?;
         }
 
         Ok(())
