@@ -196,7 +196,7 @@ impl AnvilChunkMetadata {
         }
     }
 
-    fn update_last_modified(&mut self) {
+    fn update_last_modified_timestamp(&mut self) {
         let system_time = SystemTime::now();
         let time = system_time.duration_since(UNIX_EPOCH).unwrap();
 
@@ -216,7 +216,7 @@ impl AnvilRegion {
             .create(true)
             .open(path)?;
 
-        // If necessary, expand the file length to the length of the header.
+        // If necessary, extend the file length to the length of the header.
         if REGION_HEADER_BYTES_LENGTH > file.metadata()?.len() {
             file.set_len(REGION_HEADER_BYTES_LENGTH)?;
         }
@@ -246,12 +246,7 @@ impl AnvilRegion {
             let sector_index = offset >> 8;
             let sectors = (offset & 0xFF) as u8;
 
-            let metadata = AnvilChunkMetadata {
-                sector_index,
-                sectors,
-                last_modified_timestamp,
-            };
-
+            let metadata = AnvilChunkMetadata::new(sector_index, sectors, last_modified_timestamp);
             chunks_metadata[index] = metadata;
         }
 
@@ -310,7 +305,7 @@ impl AnvilRegion {
             return Err(ChunkSaveError::LengthExceedsMaximum { length });
         }
 
-        let metadata = self.find_place(chunk_x, chunk_z, length);
+        let mut metadata = self.find_place(chunk_x, chunk_z, length)?;
         let seek_offset = metadata.sector_index as u64 * REGION_SECTOR_BYTES_LENGTH as u64;
 
         self.file.seek(SeekFrom::Start(seek_offset))?;
@@ -324,6 +319,7 @@ impl AnvilRegion {
             self.file.write_u8(0)?;
         }
 
+        metadata.update_last_modified_timestamp();
         self.update_metadata(chunk_x, chunk_z, metadata)?;
 
         Ok(())
@@ -341,17 +337,31 @@ impl AnvilRegion {
         self.chunks_metadata[Self::metadata_index(chunk_x, chunk_z)]
     }
 
-    /// Finds place where can be placed chunk with provided length.
-    fn find_place(&self, chunk_x: u8, chunk_z: u8, length: u32) -> AnvilChunkMetadata {
-        let sectors_required = (length / REGION_SECTOR_BYTES_LENGTH as u32) as u8;
+    /// Finds a place where chunk data of a given length can be put.
+    ///
+    /// If cannot find a place to put chunk data will extend file.
+    fn find_place(
+        &self,
+        chunk_x: u8,
+        chunk_z: u8,
+        length: u32,
+    ) -> Result<AnvilChunkMetadata, io::Error> {
+        let sectors = (length / REGION_SECTOR_BYTES_LENGTH as u32) as u8 + 1;
         let metadata = self.get_metadata(chunk_x, chunk_z);
 
-        // We can place chunk in the old sectors.
-        if metadata.sectors == sectors_required {
-            return metadata;
+        // Can place chunk in the old sectors.
+        if metadata.sectors == sectors {
+            return Ok(metadata);
         }
 
-        return metadata;
+        // Extending file because cannot find a place to put chunk data.
+        let extend_length = (REGION_SECTOR_BYTES_LENGTH * sectors as u16) as u64;
+        let current_length = self.file.metadata()?.len();
+        let total_sectors = current_length / REGION_HEADER_BYTES_LENGTH + 1;
+
+        self.file.set_len(current_length + extend_length)?;
+
+        return Ok(AnvilChunkMetadata::new(total_sectors as u32, sectors, 0));
     }
 
     /// Updates chunk metadata.
@@ -384,8 +394,9 @@ impl AnvilRegion {
 mod tests {
     use crate::{
         AnvilChunkMetadata, AnvilChunkProvider, AnvilRegion, ChunkLoadError,
-        REGION_HEADER_BYTES_LENGTH,
+        REGION_HEADER_BYTES_LENGTH, REGION_SECTOR_BYTES_LENGTH,
     };
+    use nbt::CompoundTag;
     use std::io::Read;
     use std::path::Path;
     use tempfile::NamedTempFile;
@@ -509,13 +520,9 @@ mod tests {
         let mut file = NamedTempFile::new().unwrap();
         let mut region = AnvilRegion::new(file.path()).unwrap();
 
-        let mut metadata = AnvilChunkMetadata {
-            sector_index: 500,
-            sectors: 10,
-            last_modified_timestamp: 15000,
-        };
+        let mut metadata = AnvilChunkMetadata::new(500, 10, 0);
+        metadata.update_last_modified_timestamp();
 
-        metadata.update_last_modified();
         region.update_metadata(15, 15, metadata).unwrap();
         let chunks_metadata = AnvilRegion::read_header(file.as_file_mut()).unwrap();
         let metadata_index = AnvilRegion::metadata_index(15, 15);
@@ -524,6 +531,28 @@ mod tests {
         assert_eq!(region.get_metadata(15, 15), metadata);
         // Written to file metadata.
         assert_eq!(chunks_metadata[metadata_index], metadata);
+    }
+
+    #[test]
+    fn test_write_chunk_with_file_extend() {
+        let file = NamedTempFile::new().unwrap();
+        let mut region = AnvilRegion::new(file.path()).unwrap();
+
+        let mut write_compound_tag = CompoundTag::new();
+        write_compound_tag.insert_bool("test_bool", true);
+        write_compound_tag.insert_str("test_str", "test");
+
+        region.write_chunk(15, 15, write_compound_tag).unwrap();
+
+        assert_eq!(
+            file.as_file().metadata().unwrap().len(),
+            REGION_HEADER_BYTES_LENGTH + REGION_SECTOR_BYTES_LENGTH as u64
+        );
+
+        let read_compound_tag = region.read_chunk(15, 15).unwrap();
+
+        assert!(read_compound_tag.get_bool("test_bool").unwrap());
+        assert_eq!(read_compound_tag.get_str("test_str").unwrap(), "test");
     }
 
 }
