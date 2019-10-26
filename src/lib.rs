@@ -20,6 +20,7 @@ use nbt::decode::TagDecodeError;
 use nbt::decode::{read_gzip_compound_tag, read_zlib_compound_tag};
 use nbt::encode::write_zlib_compound_tag;
 use nbt::CompoundTag;
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -174,6 +175,11 @@ struct AnvilRegion {
     file: File,
     /// Array of chunks metadata.
     chunks_metadata: [AnvilChunkMetadata; REGION_CHUNKS],
+    /// Free sectors for chunks data.
+    ///
+    /// Key - Amount of available sectors.
+    /// Value - Vector of start sectors indices.
+    free_sectors: HashMap<u8, Vec<u32>>,
 }
 
 /// Chunk metadata are stored in header.
@@ -222,15 +228,19 @@ impl AnvilRegion {
         }
 
         let chunks_metadata = Self::read_header(&mut file)?;
+        let total_sectors = file.metadata()?.len() as u32 / REGION_SECTOR_BYTES_LENGTH as u32;
+        let free_sectors = Self::free_sectors(total_sectors, &chunks_metadata);
 
         let region = AnvilRegion {
             file,
             chunks_metadata,
+            free_sectors,
         };
 
         Ok(region)
     }
 
+    /// First 8KB of file are header of 1024 offsets and 1024 timestamps.
     fn read_header(file: &mut File) -> Result<[AnvilChunkMetadata; REGION_CHUNKS], io::Error> {
         let mut chunks_metadata = [Default::default(); REGION_CHUNKS];
         let mut values = [0u32; REGION_CHUNKS_METADATA_LENGTH];
@@ -251,6 +261,73 @@ impl AnvilRegion {
         }
 
         return Ok(chunks_metadata);
+    }
+
+    /// Calculates free sectors to fit new chunks tightly.
+    fn free_sectors(
+        total_sectors: u32,
+        chunks_metadata: &[AnvilChunkMetadata],
+    ) -> HashMap<u8, Vec<u32>> {
+        let mut used_sectors: Vec<bool> = vec![false; total_sectors as usize];
+
+        used_sectors[0] = true;
+        used_sectors[1] = true;
+
+        for metadata in chunks_metadata {
+            if metadata.is_empty() {
+                continue;
+            }
+
+            let start_index = metadata.sector_index as usize;
+            let end_index = start_index + metadata.sectors as usize;
+
+            for index in start_index..end_index {
+                used_sectors[index] = true;
+            }
+        }
+
+        let mut free_sectors: HashMap<u8, Vec<u32>> = HashMap::new();
+        let mut current_sector_index = 0;
+        let mut current_sectors_free = 0;
+
+        for sector_index in 0..total_sectors {
+            if !used_sectors[sector_index as usize] {
+                if current_sector_index != 0 {
+                    // Incrementing sector sequence.
+                    current_sectors_free += 1;
+                } else {
+                    // Starting new sector sequence.
+                    current_sector_index = sector_index;
+                    current_sectors_free = 1;
+                }
+            } else {
+                if current_sector_index != 0 {
+                    // Pushing sector sequence result to `free_sectors`.
+                    match free_sectors.get_mut(&current_sectors_free) {
+                        Some(sectors_indices) => sectors_indices.push(current_sector_index),
+                        None => {
+                            free_sectors.insert(current_sectors_free, vec![current_sector_index]);
+                        }
+                    }
+
+                    // Resetting current sector sequence.
+                    current_sector_index = 0;
+                    current_sectors_free = 0;
+                }
+            }
+        }
+
+        if current_sector_index != 0 {
+            // Pushing sector sequence result to `free_sectors`.
+            match free_sectors.get_mut(&current_sectors_free) {
+                Some(sectors_indices) => sectors_indices.push(current_sector_index),
+                None => {
+                    free_sectors.insert(current_sectors_free, vec![current_sector_index]);
+                }
+            }
+        }
+
+        free_sectors
     }
 
     fn read_chunk(&mut self, chunk_x: u8, chunk_z: u8) -> Result<CompoundTag, ChunkLoadError> {
@@ -583,6 +660,73 @@ mod tests {
         assert!(read_compound_tag.get_bool("test_bool").unwrap());
         assert_eq!(read_compound_tag.get_str("test_str").unwrap(), "test");
         assert!(!read_compound_tag.contains_key("test_f32"));
+    }
+
+    #[test]
+    fn test_write_chunk_same_sector_with_file_expand() {
+        let file = NamedTempFile::new().unwrap();
+        let mut region = AnvilRegion::new(file.path()).unwrap();
+
+        let mut write_compound_tag_1 = CompoundTag::new();
+        write_compound_tag_1.insert_bool("test_bool", true);
+        write_compound_tag_1.insert_str("test_str", "test");
+
+        region.write_chunk(15, 15, write_compound_tag_1).unwrap();
+
+        let mut write_compound_tag_2 = CompoundTag::new();
+        let mut i32_vec = Vec::new();
+
+        // Extending chunk to second sector.
+        // Due compression we need to write more than 1024 ints.
+        for i in 0..3000 {
+            i32_vec.push(i)
+        }
+
+        write_compound_tag_2.insert_i32_vec("test_i32_vec", i32_vec);
+
+        region.write_chunk(15, 15, write_compound_tag_2).unwrap();
+
+        assert_eq!(
+            file.as_file().metadata().unwrap().len(),
+            REGION_HEADER_BYTES_LENGTH + REGION_SECTOR_BYTES_LENGTH as u64 * 2
+        );
+    }
+
+    // TODO: Finish test.
+    #[test]
+    fn test_write_chunk_with_insert_in_middle() {
+        let file = NamedTempFile::new().unwrap();
+        let mut region = AnvilRegion::new(file.path()).unwrap();
+    }
+
+    #[test]
+    fn test_free_sectors_only_header_used() {
+        let empty_chunks_metadata = Vec::new();
+        let free_sectors = AnvilRegion::free_sectors(10, &empty_chunks_metadata);
+
+        // Two sectors are used for header data.
+        assert_eq!(free_sectors.get(&8).unwrap(), &vec![2]);
+    }
+
+    #[test]
+    fn test_free_sectors_all_used() {
+        let chunks_metadata = vec![AnvilChunkMetadata::new(2, 8, 0)];
+        let free_sectors = AnvilRegion::free_sectors(10, &chunks_metadata);
+
+        assert!(free_sectors.is_empty());
+    }
+
+    #[test]
+    fn test_free_sectors_partially_used() {
+        let chunks_metadata = vec![
+            AnvilChunkMetadata::new(3, 3, 0),
+            AnvilChunkMetadata::new(8, 1, 0),
+        ];
+
+        let free_sectors = AnvilRegion::free_sectors(10, &chunks_metadata);
+
+        assert_eq!(free_sectors.get(&1).unwrap(), &vec![2, 9]);
+        assert_eq!(free_sectors.get(&2).unwrap(), &vec![6]);
     }
 
 }
