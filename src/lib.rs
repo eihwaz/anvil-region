@@ -555,4 +555,34 @@ mod tests {
         assert_eq!(read_compound_tag.get_str("test_str").unwrap(), "test");
     }
 
+    #[test]
+    fn test_write_chunk_same_sector() {
+        let file = NamedTempFile::new().unwrap();
+        let mut region = AnvilRegion::new(file.path()).unwrap();
+
+        let mut write_compound_tag_1 = CompoundTag::new();
+        write_compound_tag_1.insert_bool("test_bool", true);
+        write_compound_tag_1.insert_str("test_str", "test");
+        write_compound_tag_1.insert_f32("test_f32", 1.23);
+
+        region.write_chunk(15, 15, write_compound_tag_1).unwrap();
+
+        let mut write_compound_tag_2 = CompoundTag::new();
+        write_compound_tag_2.insert_bool("test_bool", true);
+        write_compound_tag_2.insert_str("test_str", "test");
+
+        region.write_chunk(15, 15, write_compound_tag_2).unwrap();
+
+        assert_eq!(
+            file.as_file().metadata().unwrap().len(),
+            REGION_HEADER_BYTES_LENGTH + REGION_SECTOR_BYTES_LENGTH as u64
+        );
+
+        let read_compound_tag = region.read_chunk(15, 15).unwrap();
+
+        assert!(read_compound_tag.get_bool("test_bool").unwrap());
+        assert_eq!(read_compound_tag.get_str("test_str").unwrap(), "test");
+        assert!(!read_compound_tag.contains_key("test_f32"));
+    }
+
 }
