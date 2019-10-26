@@ -15,13 +15,15 @@
 //! assert_eq!(level_tag.get_i32("xPos").unwrap(), 4);
 //! assert_eq!(level_tag.get_i32("zPos").unwrap(), 2);
 //! ```
-use byteorder::{BigEndian, ReadBytesExt};
+use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use nbt::decode::TagDecodeError;
 use nbt::decode::{read_gzip_compound_tag, read_zlib_compound_tag};
+use nbt::encode::write_zlib_compound_tag;
 use nbt::CompoundTag;
 use std::fs::{File, OpenOptions};
-use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::{fs, io};
 
 /// Amount of chunks in region.
@@ -32,6 +34,12 @@ const REGION_CHUNKS_METADATA_LENGTH: usize = 2 * REGION_CHUNKS;
 const REGION_HEADER_BYTES_LENGTH: u64 = 8 * REGION_CHUNKS as u64;
 /// Region sector length in bytes.
 const REGION_SECTOR_BYTES_LENGTH: u16 = 4096;
+/// Maximum chunk length in bytes.
+const CHUNK_MAXIMUM_BYTES_LENGTH: u32 = REGION_SECTOR_BYTES_LENGTH as u32 * 256;
+/// Gzip compression type value.
+const GZIP_COMPRESSION_TYPE: u8 = 1;
+/// Zlib compression type value.
+const ZLIB_COMPRESSION_TYPE: u8 = 2;
 
 /// Possible errors while loading the chunk.
 #[derive(Debug)]
@@ -82,6 +90,26 @@ impl From<TagDecodeError> for ChunkLoadError {
     }
 }
 
+/// Possible errors while saving the chunk.
+#[derive(Debug)]
+pub enum ChunkSaveError {
+    /// Chunk length exceeds 1 MB.
+    ///
+    /// This should not occur under normal conditions.
+    LengthExceedsMaximum {
+        /// Chunk length.
+        length: u32,
+    },
+    /// I/O Error which happened while were writing chunk data to region file.
+    WriteError { io_error: io::Error },
+}
+
+impl From<io::Error> for ChunkSaveError {
+    fn from(io_error: io::Error) -> Self {
+        ChunkSaveError::WriteError { io_error }
+    }
+}
+
 pub struct AnvilChunkProvider<'a> {
     /// Folder where region files located.
     folder_path: &'a Path,
@@ -114,12 +142,29 @@ impl<'a> AnvilChunkProvider<'a> {
         region.read_chunk(region_chunk_x, region_chunk_z)
     }
 
-    pub fn save_chunk(&self, chunk_compound_tag: CompoundTag) -> Result<(), io::Error> {
+    pub fn save_chunk(
+        &self,
+        chunk_x: i32,
+        chunk_z: i32,
+        chunk_compound_tag: CompoundTag,
+    ) -> Result<(), ChunkSaveError> {
         if !self.folder_path.exists() {
             fs::create_dir(self.folder_path)?;
         }
 
-        Ok(())
+        let region_x = chunk_x >> 5;
+        let region_z = chunk_z >> 5;
+
+        let region_chunk_x = (chunk_x & 31) as u8;
+        let region_chunk_z = (chunk_z & 31) as u8;
+
+        let region_name = format!("r.{}.{}.mca", region_x, region_z);
+        let region_path = self.folder_path.join(region_name);
+
+        // TODO: Cache region files.
+        let mut region = AnvilRegion::new(region_path)?;
+
+        region.write_chunk(region_chunk_x, region_chunk_z, chunk_compound_tag)
     }
 }
 
@@ -138,7 +183,7 @@ struct AnvilChunkMetadata {
     sector_index: u32,
     /// Amount of sectors used to store chunk.
     sectors: u8,
-    /// Last time chunk was modified.
+    /// Last time in seconds when chunk was modified.
     last_modified_timestamp: u32,
 }
 
@@ -149,6 +194,13 @@ impl AnvilChunkMetadata {
             sectors,
             last_modified_timestamp,
         }
+    }
+
+    fn update_last_modified(&mut self) {
+        let system_time = SystemTime::now();
+        let time = system_time.duration_since(UNIX_EPOCH).unwrap();
+
+        self.last_modified_timestamp = time.as_secs() as u32
     }
 
     fn is_empty(&self) -> bool {
@@ -214,7 +266,8 @@ impl AnvilRegion {
         }
 
         let seek_offset = metadata.sector_index as u64 * REGION_SECTOR_BYTES_LENGTH as u64;
-        let maximum_length = metadata.sectors as u32 * REGION_SECTOR_BYTES_LENGTH as u32;
+        let maximum_length = (metadata.sectors as u32 * REGION_SECTOR_BYTES_LENGTH as u32)
+            .min(CHUNK_MAXIMUM_BYTES_LENGTH);
 
         self.file.seek(SeekFrom::Start(seek_offset))?;
         let length = self.file.read_u32::<BigEndian>()?;
@@ -233,17 +286,97 @@ impl AnvilRegion {
         let mut cursor = Cursor::new(&compressed_buffer);
 
         match compression_scheme {
-            1 => Ok(read_gzip_compound_tag(&mut cursor)?),
-            2 => Ok(read_zlib_compound_tag(&mut cursor)?),
+            GZIP_COMPRESSION_TYPE => Ok(read_gzip_compound_tag(&mut cursor)?),
+            ZLIB_COMPRESSION_TYPE => Ok(read_zlib_compound_tag(&mut cursor)?),
             _ => Err(ChunkLoadError::UnsupportedCompressionScheme { compression_scheme }),
         }
     }
 
-    fn get_metadata(&self, x: u8, z: u8) -> AnvilChunkMetadata {
-        assert!(32 > x, "Region chunk x coordinate out of bounds");
-        assert!(32 > z, "Region chunk y coordinate out of bounds");
+    fn write_chunk(
+        &mut self,
+        chunk_x: u8,
+        chunk_z: u8,
+        chunk_compound_tag: CompoundTag,
+    ) -> Result<(), ChunkSaveError> {
+        let mut buffer = Vec::new();
 
-        self.chunks_metadata[x as usize + z as usize * 32]
+        buffer.write_u8(ZLIB_COMPRESSION_TYPE)?;
+        write_zlib_compound_tag(&mut buffer, chunk_compound_tag)?;
+
+        // 4 bytes for data length.
+        let length = (buffer.len() + 4) as u32;
+
+        if length > CHUNK_MAXIMUM_BYTES_LENGTH {
+            return Err(ChunkSaveError::LengthExceedsMaximum { length });
+        }
+
+        let metadata = self.find_place(chunk_x, chunk_z, length);
+        let seek_offset = metadata.sector_index as u64 * REGION_SECTOR_BYTES_LENGTH as u64;
+
+        self.file.seek(SeekFrom::Start(seek_offset))?;
+        self.file.write_u32::<BigEndian>(buffer.len() as u32)?;
+        self.file.write_all(&buffer)?;
+
+        // Padding to align sector.
+        let padding = REGION_SECTOR_BYTES_LENGTH - length as u16 % REGION_SECTOR_BYTES_LENGTH;
+
+        for _ in 0..padding {
+            self.file.write_u8(0)?;
+        }
+
+        self.update_metadata(chunk_x, chunk_z, metadata)?;
+
+        Ok(())
+    }
+
+    fn metadata_index(chunk_x: u8, chunk_z: u8) -> usize {
+        assert!(32 > chunk_x, "Region chunk x coordinate out of bounds");
+        assert!(32 > chunk_z, "Region chunk y coordinate out of bounds");
+
+        chunk_x as usize + chunk_z as usize * 32
+    }
+
+    /// Returns chunk metadata at specified coordinates.
+    fn get_metadata(&self, chunk_x: u8, chunk_z: u8) -> AnvilChunkMetadata {
+        self.chunks_metadata[Self::metadata_index(chunk_x, chunk_z)]
+    }
+
+    /// Finds place where can be placed chunk with provided length.
+    fn find_place(&self, chunk_x: u8, chunk_z: u8, length: u32) -> AnvilChunkMetadata {
+        let sectors_required = (length / REGION_SECTOR_BYTES_LENGTH as u32) as u8;
+        let metadata = self.get_metadata(chunk_x, chunk_z);
+
+        // We can place chunk in the old sectors.
+        if metadata.sectors == sectors_required {
+            return metadata;
+        }
+
+        return metadata;
+    }
+
+    /// Updates chunk metadata.
+    fn update_metadata(
+        &mut self,
+        chunk_x: u8,
+        chunk_z: u8,
+        metadata: AnvilChunkMetadata,
+    ) -> Result<(), io::Error> {
+        let metadata_index = Self::metadata_index(chunk_x, chunk_z);
+        self.chunks_metadata[metadata_index] = metadata;
+
+        let start_seek_offset = SeekFrom::Start((metadata_index * 4) as u64);
+        let offset = (metadata.sector_index << 8) | metadata.sectors as u32;
+
+        self.file.seek(start_seek_offset)?;
+        self.file.write_u32::<BigEndian>(offset)?;
+
+        let next_seek_offset = SeekFrom::Current(REGION_SECTOR_BYTES_LENGTH as i64 - 4);
+        let last_modified_timestamp = metadata.last_modified_timestamp;
+
+        self.file.seek(next_seek_offset)?;
+        self.file.write_u32::<BigEndian>(last_modified_timestamp)?;
+
+        Ok(())
     }
 }
 
@@ -259,7 +392,7 @@ mod tests {
 
     #[test]
     fn test_empty_header_write() {
-        let mut file = NamedTempFile::new().unwrap();
+        let file = NamedTempFile::new().unwrap();
         let region = AnvilRegion::new(file.path()).unwrap();
         let file_length = region.file.metadata().unwrap().len();
 
@@ -269,7 +402,7 @@ mod tests {
     #[test]
     fn test_empty_region_init() {
         let mut file = NamedTempFile::new().unwrap();
-        let region = AnvilRegion::new(file.path()).unwrap();
+        AnvilRegion::new(file.path()).unwrap();
 
         let mut vec = Vec::new();
         file.read_to_end(&mut vec).unwrap();
@@ -369,6 +502,28 @@ mod tests {
             }
             _ => panic!("Expected `ChunkNotFound` but got `{:?}", load_error),
         }
+    }
+
+    #[test]
+    fn test_update_metadata() {
+        let mut file = NamedTempFile::new().unwrap();
+        let mut region = AnvilRegion::new(file.path()).unwrap();
+
+        let mut metadata = AnvilChunkMetadata {
+            sector_index: 500,
+            sectors: 10,
+            last_modified_timestamp: 15000,
+        };
+
+        metadata.update_last_modified();
+        region.update_metadata(15, 15, metadata).unwrap();
+        let chunks_metadata = AnvilRegion::read_header(file.as_file_mut()).unwrap();
+        let metadata_index = AnvilRegion::metadata_index(15, 15);
+
+        // In memory metadata.
+        assert_eq!(region.get_metadata(15, 15), metadata);
+        // Written to file metadata.
+        assert_eq!(chunks_metadata[metadata_index], metadata);
     }
 
 }
