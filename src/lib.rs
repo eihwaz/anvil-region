@@ -4,16 +4,38 @@
 //!
 //! # Example
 //!
+//! ## Read
+//!
 //! ```
 //! use anvil_region::AnvilChunkProvider;
 //!
 //! let chunk_provider = AnvilChunkProvider::new("test/region");
 //!
 //! let chunk_compound_tag = chunk_provider.load_chunk(4, 2).unwrap();
-//! let level_tag = chunk_compound_tag.get_compound_tag("Level").unwrap();
+//! let level_compound_tag = chunk_compound_tag.get_compound_tag("Level").unwrap();
 //!
-//! assert_eq!(level_tag.get_i32("xPos").unwrap(), 4);
-//! assert_eq!(level_tag.get_i32("zPos").unwrap(), 2);
+//! assert_eq!(level_compound_tag.get_i32("xPos").unwrap(), 4);
+//! assert_eq!(level_compound_tag.get_i32("zPos").unwrap(), 2);
+//! ```
+//!
+//! ## Write
+//!
+//! ```
+//! use anvil_region::AnvilChunkProvider;
+//! use nbt::CompoundTag;
+//!
+//! let chunk_provider = AnvilChunkProvider::new("test/region");
+//! let mut chunk_compound_tag = CompoundTag::new();
+//! let mut level_compound_tag = CompoundTag::new();
+//!
+//! // To simplify example we add only coordinates.
+//! // Full list of required tags https://minecraft.gamepedia.com/Chunk_format.
+//! level_compound_tag.insert_i32("xPos", 31);
+//! level_compound_tag.insert_i32("zPos", 16);
+//!
+//! chunk_compound_tag.insert_compound_tag("Level", level_compound_tag);
+//!
+//! chunk_provider.save_chunk(31, 16, chunk_compound_tag);
 //! ```
 use bitvec::prelude::*;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
@@ -123,6 +145,21 @@ impl<'a> AnvilChunkProvider<'a> {
         AnvilChunkProvider { folder_path }
     }
 
+    /// Load chunks from the specified coordinates.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use anvil_region::AnvilChunkProvider;
+    ///
+    /// let chunk_provider = AnvilChunkProvider::new("test/region");
+    ///
+    /// let chunk_compound_tag = chunk_provider.load_chunk(4, 2).unwrap();
+    /// let level_compound_tag = chunk_compound_tag.get_compound_tag("Level").unwrap();
+    ///
+    /// assert_eq!(level_compound_tag.get_i32("xPos").unwrap(), 4);
+    /// assert_eq!(level_compound_tag.get_i32("zPos").unwrap(), 2);
+    /// ```
     pub fn load_chunk(&self, chunk_x: i32, chunk_z: i32) -> Result<CompoundTag, ChunkLoadError> {
         let region_x = chunk_x >> 5;
         let region_z = chunk_z >> 5;
@@ -143,6 +180,27 @@ impl<'a> AnvilChunkProvider<'a> {
         region.read_chunk(region_chunk_x, region_chunk_z)
     }
 
+    /// Saves chunk data to the specified coordinates.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use anvil_region::AnvilChunkProvider;
+    /// use nbt::CompoundTag;
+    ///
+    /// let chunk_provider = AnvilChunkProvider::new("test/region");
+    /// let mut chunk_compound_tag = CompoundTag::new();
+    /// let mut level_compound_tag = CompoundTag::new();
+    ///
+    /// // To simplify example we add only coordinates.
+    /// // Full list of required tags https://minecraft.gamepedia.com/Chunk_format.
+    /// level_compound_tag.insert_i32("xPos", 31);
+    /// level_compound_tag.insert_i32("zPos", 16);
+    ///
+    /// chunk_compound_tag.insert_compound_tag("Level", level_compound_tag);
+    ///
+    /// chunk_provider.save_chunk(31, 16, chunk_compound_tag);
+    /// ```
     pub fn save_chunk(
         &self,
         chunk_x: i32,
