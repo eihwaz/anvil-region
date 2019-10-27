@@ -7,7 +7,7 @@ description = "Region file format storage for chunks."
 license = "MIT"
 homepage = "https://github.com/eihwaz/anvil-region"
 repository = "https://github.com/eihwaz/anvil-region"
-keywords = ["minecraft", "anvil", "io"]
+keywords = ["minecraft", "region", "anvil", "io"]
 readme = "README.md"
 
 [dependencies]
