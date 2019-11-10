@@ -175,7 +175,7 @@ impl<'a> AnvilChunkProvider<'a> {
         }
 
         // TODO: Cache region files.
-        let mut region = AnvilRegion::new(region_path)?;
+        let mut region = AnvilRegion::file(region_path)?;
 
         region.read_chunk(region_chunk_x, region_chunk_z)
     }
@@ -221,16 +221,16 @@ impl<'a> AnvilChunkProvider<'a> {
         let region_path = self.folder_path.join(region_name);
 
         // TODO: Cache region files.
-        let mut region = AnvilRegion::new(region_path)?;
+        let mut region = AnvilRegion::file(region_path)?;
 
         region.write_chunk(region_chunk_x, region_chunk_z, chunk_compound_tag)
     }
 }
 
 /// Region represents a 32x32 group of chunks.
-struct AnvilRegion {
+pub struct AnvilRegion<F> {
     /// File in which region are stored.
-    file: File,
+    file: F,
     /// Array of chunks metadata.
     chunks_metadata: [AnvilChunkMetadata; REGION_CHUNKS],
     /// Used sectors for chunks data.
@@ -239,7 +239,7 @@ struct AnvilRegion {
 
 /// Chunk metadata are stored in header.
 #[derive(Copy, Clone, Default, Debug, Eq, PartialEq)]
-struct AnvilChunkMetadata {
+pub struct AnvilChunkMetadata {
     /// Sector index from which starts chunk data.
     sector_index: u32,
     /// Amount of sectors used to store chunk.
@@ -269,22 +269,91 @@ impl AnvilChunkMetadata {
     }
 }
 
-impl AnvilRegion {
-    fn new<P: AsRef<Path>>(path: P) -> Result<Self, io::Error> {
-        let mut file = OpenOptions::new()
+pub mod anvil_region {
+    use bitvec::prelude::*;
+    use crate::AnvilChunkMetadata;
+
+    pub fn metadata_index(chunk_x: u8, chunk_z: u8) -> usize {
+        assert!(32 > chunk_x, "Region chunk x coordinate out of bounds");
+        assert!(32 > chunk_z, "Region chunk y coordinate out of bounds");
+
+        chunk_x as usize + chunk_z as usize * 32
+    }
+
+    /// Calculates used sectors.
+    pub fn used_sectors(total_sectors: u32, chunks_metadata: &[AnvilChunkMetadata]) -> BitVec {
+        let mut used_sectors = bitvec![0; total_sectors as usize];
+
+        used_sectors.set(0, true);
+        used_sectors.set(1, true);
+
+        for metadata in chunks_metadata {
+            if metadata.is_empty() {
+                continue;
+            }
+
+            let start_index = metadata.sector_index as usize;
+            let end_index = start_index + metadata.sectors as usize;
+
+            for index in start_index..end_index {
+                used_sectors.set(index, true);
+            }
+        }
+
+        used_sectors
+    }
+}
+
+fn stream_len<S: Seek>(file: &mut S) -> Result<u64, io::Error> {
+    let old_pos = file.seek(SeekFrom::Current(0))?;
+    let len = file.seek(SeekFrom::End(0))?;
+
+    // Avoid seeking a third time when we were already at the end of the
+    // stream. The branch is usually way cheaper than a seek operation.
+    if old_pos != len {
+        file.seek(SeekFrom::Start(old_pos))?;
+    }
+
+    Ok(len)
+}
+
+fn stream_set_len<S: Seek+Write>(file: &mut S, new_len: u64) -> Result<u64, io::Error> {
+    let old_pos = file.seek(SeekFrom::Current(0))?;
+    let len = file.seek(SeekFrom::Start(new_len - 1))? + 1;
+
+    // Actually write so the stream len changes
+    file.write_all(&[0])?;
+    // Avoid seeking a third time when we were already at the end of the
+    // stream. The branch is usually way cheaper than a seek operation.
+    if old_pos != len {
+        file.seek(SeekFrom::Start(old_pos))?;
+    }
+
+    Ok(len)
+}
+
+impl AnvilRegion<File> {
+    pub fn file<P: AsRef<Path>>(path: P) -> Result<Self, io::Error> {
+        let file = OpenOptions::new()
             .write(true)
             .read(true)
             .create(true)
             .open(path)?;
 
+        Self::new(file)
+    }
+}
+
+impl<F: Seek+Read+Write> AnvilRegion<F> {
+    pub fn new(mut file: F) -> Result<Self, io::Error> {
         // If necessary, extend the file length to the length of the header.
-        if REGION_HEADER_BYTES_LENGTH > file.metadata()?.len() {
-            file.set_len(REGION_HEADER_BYTES_LENGTH)?;
+        if REGION_HEADER_BYTES_LENGTH > stream_len(&mut file)? {
+            stream_set_len(&mut file, REGION_HEADER_BYTES_LENGTH)?;
         }
 
         let chunks_metadata = Self::read_header(&mut file)?;
-        let total_sectors = file.metadata()?.len() as u32 / REGION_SECTOR_BYTES_LENGTH as u32;
-        let free_sectors = Self::used_sectors(total_sectors, &chunks_metadata);
+        let total_sectors = stream_len(&mut file)? as u32 / REGION_SECTOR_BYTES_LENGTH as u32;
+        let free_sectors = anvil_region::used_sectors(total_sectors, &chunks_metadata);
 
         let region = AnvilRegion {
             file,
@@ -296,7 +365,7 @@ impl AnvilRegion {
     }
 
     /// First 8KB of file are header of 1024 offsets and 1024 timestamps.
-    fn read_header(file: &mut File) -> Result<[AnvilChunkMetadata; REGION_CHUNKS], io::Error> {
+    fn read_header(file: &mut F) -> Result<[AnvilChunkMetadata; REGION_CHUNKS], io::Error> {
         let mut chunks_metadata = [Default::default(); REGION_CHUNKS];
         let mut values = [0u32; REGION_CHUNKS_METADATA_LENGTH];
 
@@ -318,30 +387,7 @@ impl AnvilRegion {
         return Ok(chunks_metadata);
     }
 
-    /// Calculates used sectors.
-    fn used_sectors(total_sectors: u32, chunks_metadata: &[AnvilChunkMetadata]) -> BitVec {
-        let mut used_sectors = bitvec![0; total_sectors as usize];
-
-        used_sectors.set(0, true);
-        used_sectors.set(1, true);
-
-        for metadata in chunks_metadata {
-            if metadata.is_empty() {
-                continue;
-            }
-
-            let start_index = metadata.sector_index as usize;
-            let end_index = start_index + metadata.sectors as usize;
-
-            for index in start_index..end_index {
-                used_sectors.set(index, true);
-            }
-        }
-
-        used_sectors
-    }
-
-    fn read_chunk(&mut self, chunk_x: u8, chunk_z: u8) -> Result<CompoundTag, ChunkLoadError> {
+    pub fn read_chunk(&mut self, chunk_x: u8, chunk_z: u8) -> Result<CompoundTag, ChunkLoadError> {
         let metadata = self.get_metadata(chunk_x, chunk_z);
 
         if metadata.is_empty() {
@@ -413,16 +459,9 @@ impl AnvilRegion {
         Ok(())
     }
 
-    fn metadata_index(chunk_x: u8, chunk_z: u8) -> usize {
-        assert!(32 > chunk_x, "Region chunk x coordinate out of bounds");
-        assert!(32 > chunk_z, "Region chunk y coordinate out of bounds");
-
-        chunk_x as usize + chunk_z as usize * 32
-    }
-
     /// Returns chunk metadata at specified coordinates.
     fn get_metadata(&self, chunk_x: u8, chunk_z: u8) -> AnvilChunkMetadata {
-        self.chunks_metadata[Self::metadata_index(chunk_x, chunk_z)]
+        self.chunks_metadata[anvil_region::metadata_index(chunk_x, chunk_z)]
     }
 
     /// Finds a place where chunk data of a given length can be put.
@@ -448,7 +487,7 @@ impl AnvilRegion {
             self.used_sectors.set(sector_index, false);
         }
 
-        let file_length = self.file.metadata()?.len();
+        let file_length = self.stream_len()?;
         let total_sectors = file_length / REGION_SECTOR_BYTES_LENGTH as u64;
 
         // Trying to find enough big gap between sectors to put chunk.
@@ -479,7 +518,7 @@ impl AnvilRegion {
         // Extending file because cannot find a place to put chunk data.
         let extend_sectors = sectors_required - sectors_free;
         let extend_length = (REGION_SECTOR_BYTES_LENGTH * extend_sectors as u16) as u64;
-        self.file.set_len(file_length + extend_length)?;
+        self.stream_set_len(file_length + extend_length)?;
 
         // Mark new sectors as used.
         for _ in 0..extend_sectors {
@@ -500,7 +539,7 @@ impl AnvilRegion {
         chunk_z: u8,
         metadata: AnvilChunkMetadata,
     ) -> Result<(), io::Error> {
-        let metadata_index = Self::metadata_index(chunk_x, chunk_z);
+        let metadata_index = anvil_region::metadata_index(chunk_x, chunk_z);
         self.chunks_metadata[metadata_index] = metadata;
 
         let start_seek_offset = SeekFrom::Start((metadata_index * 4) as u64);
@@ -517,10 +556,19 @@ impl AnvilRegion {
 
         Ok(())
     }
+
+    fn stream_len(&mut self) -> Result<u64, io::Error> {
+        stream_len(&mut self.file)
+    }
+
+    fn stream_set_len(&mut self, new_len: u64) -> Result<u64, io::Error> {
+        stream_set_len(&mut self.file, new_len)
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::{
         AnvilChunkMetadata, AnvilChunkProvider, AnvilRegion, ChunkLoadError,
         REGION_HEADER_BYTES_LENGTH, REGION_SECTOR_BYTES_LENGTH,
@@ -531,10 +579,18 @@ mod tests {
     use tempfile::NamedTempFile;
 
     #[test]
+    fn test_empty_header_write_cursor() {
+        let mut region = AnvilRegion::new(Cursor::new(vec![])).unwrap();
+        let file_length = region.stream_len().unwrap();
+
+        assert_eq!(file_length, REGION_HEADER_BYTES_LENGTH);
+    }
+
+    #[test]
     fn test_empty_header_write() {
         let file = NamedTempFile::new().unwrap();
-        let region = AnvilRegion::new(file.path()).unwrap();
-        let file_length = region.file.metadata().unwrap().len();
+        let mut region = AnvilRegion::file(file.path()).unwrap();
+        let file_length = region.stream_len().unwrap();
 
         assert_eq!(file_length, REGION_HEADER_BYTES_LENGTH);
     }
@@ -542,7 +598,7 @@ mod tests {
     #[test]
     fn test_empty_region_init() {
         let mut file = NamedTempFile::new().unwrap();
-        AnvilRegion::new(file.path()).unwrap();
+        AnvilRegion::file(file.path()).unwrap();
 
         let mut vec = Vec::new();
         file.read_to_end(&mut vec).unwrap();
@@ -563,7 +619,7 @@ mod tests {
         let path = Path::new("test/region/r.0.0.mca");
         assert!(path.exists());
 
-        let region = AnvilRegion::new(path).unwrap();
+        let region = AnvilRegion::file(path).unwrap();
 
         for (index, expected_chunk_metadata) in expected_data.iter().enumerate() {
             let chunk_metadata = region.chunks_metadata[256 + index];
@@ -577,7 +633,7 @@ mod tests {
         let path = Path::new("test/region/r.0.0.mca");
         assert!(path.exists());
 
-        let mut region = AnvilRegion::new(path).unwrap();
+        let mut region = AnvilRegion::file(path).unwrap();
         let compound_tag = region.read_chunk(15, 3).unwrap();
         let level_tag = compound_tag.get_compound_tag("Level").unwrap();
 
@@ -590,7 +646,7 @@ mod tests {
         let path = Path::new("test/empty_region.mca");
         assert!(path.exists());
 
-        let mut region = AnvilRegion::new(path).unwrap();
+        let mut region = AnvilRegion::file(path).unwrap();
         let load_error = region.read_chunk(0, 0).err().unwrap();
 
         match load_error {
@@ -647,14 +703,14 @@ mod tests {
     #[test]
     fn test_update_metadata() {
         let mut file = NamedTempFile::new().unwrap();
-        let mut region = AnvilRegion::new(file.path()).unwrap();
+        let mut region = AnvilRegion::file(file.path()).unwrap();
 
         let mut metadata = AnvilChunkMetadata::new(500, 10, 0);
         metadata.update_last_modified_timestamp();
 
         region.update_metadata(15, 15, metadata).unwrap();
         let chunks_metadata = AnvilRegion::read_header(file.as_file_mut()).unwrap();
-        let metadata_index = AnvilRegion::metadata_index(15, 15);
+        let metadata_index = anvil_region::metadata_index(15, 15);
 
         // In memory metadata.
         assert_eq!(region.get_metadata(15, 15), metadata);
@@ -665,7 +721,7 @@ mod tests {
     #[test]
     fn test_write_chunk_with_file_extend() {
         let file = NamedTempFile::new().unwrap();
-        let mut region = AnvilRegion::new(file.path()).unwrap();
+        let mut region = AnvilRegion::file(file.path()).unwrap();
 
         let mut write_compound_tag = CompoundTag::new();
         write_compound_tag.insert_bool("test_bool", true);
@@ -689,7 +745,7 @@ mod tests {
     #[test]
     fn test_write_chunk_same_sector() {
         let file = NamedTempFile::new().unwrap();
-        let mut region = AnvilRegion::new(file.path()).unwrap();
+        let mut region = AnvilRegion::file(file.path()).unwrap();
 
         let mut write_compound_tag_1 = CompoundTag::new();
         write_compound_tag_1.insert_bool("test_bool", true);
@@ -721,7 +777,7 @@ mod tests {
     #[test]
     fn test_write_chunk_same_sector_with_file_expand() {
         let file = NamedTempFile::new().unwrap();
-        let mut region = AnvilRegion::new(file.path()).unwrap();
+        let mut region = AnvilRegion::file(file.path()).unwrap();
 
         let mut write_compound_tag_1 = CompoundTag::new();
         write_compound_tag_1.insert_bool("test_bool", true);
@@ -753,7 +809,7 @@ mod tests {
     #[test]
     fn test_write_chunk_with_insert_in_middle() {
         let file = NamedTempFile::new().unwrap();
-        let mut region = AnvilRegion::new(file.path()).unwrap();
+        let mut region = AnvilRegion::file(file.path()).unwrap();
 
         let mut write_compound_tag = CompoundTag::new();
         write_compound_tag.insert_bool("test_bool", true);
@@ -778,7 +834,7 @@ mod tests {
     #[test]
     fn test_write_chunk_not_enough_gap() {
         let file = NamedTempFile::new().unwrap();
-        let mut region = AnvilRegion::new(file.path()).unwrap();
+        let mut region = AnvilRegion::file(file.path()).unwrap();
 
         let mut write_compound_tag_1 = CompoundTag::new();
         write_compound_tag_1.insert_bool("test_bool", true);
@@ -814,7 +870,7 @@ mod tests {
     #[test]
     fn test_used_sectors_only_header() {
         let empty_chunks_metadata = Vec::new();
-        let used_sectors = AnvilRegion::used_sectors(8, &empty_chunks_metadata);
+        let used_sectors = anvil_region::used_sectors(8, &empty_chunks_metadata);
 
         // Two sectors are used for header data.
         assert_eq!(used_sectors.into_vec()[0], 0b11000000);
@@ -823,7 +879,7 @@ mod tests {
     #[test]
     fn test_used_sectors_all() {
         let chunks_metadata = vec![AnvilChunkMetadata::new(2, 6, 0)];
-        let used_sectors = AnvilRegion::used_sectors(8, &chunks_metadata);
+        let used_sectors = anvil_region::used_sectors(8, &chunks_metadata);
 
         assert_eq!(used_sectors.into_vec()[0], 0b11111111);
     }
@@ -835,7 +891,7 @@ mod tests {
             AnvilChunkMetadata::new(8, 1, 0),
         ];
 
-        let used_sectors = AnvilRegion::used_sectors(10, &chunks_metadata);
+        let used_sectors = anvil_region::used_sectors(10, &chunks_metadata);
         let used_vec = used_sectors.into_vec();
 
         assert_eq!(used_vec[0], 0b11011100);
