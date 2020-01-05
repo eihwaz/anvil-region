@@ -7,9 +7,9 @@
 //! ## Read
 //!
 //! ```
-//! use anvil_region::AnvilChunkProvider;
+//! use anvil_region::FolderChunkProvider;
 //!
-//! let chunk_provider = AnvilChunkProvider::new("test/region");
+//! let chunk_provider = FolderChunkProvider::new("test/region");
 //!
 //! let chunk_compound_tag = chunk_provider.load_chunk(4, 2).unwrap();
 //! let level_compound_tag = chunk_compound_tag.get_compound_tag("Level").unwrap();
@@ -21,10 +21,10 @@
 //! ## Write
 //!
 //! ```
-//! use anvil_region::AnvilChunkProvider;
+//! use anvil_region::FolderChunkProvider;
 //! use nbt::CompoundTag;
 //!
-//! let chunk_provider = AnvilChunkProvider::new("test/region");
+//! let chunk_provider = FolderChunkProvider::new("test/region");
 //! let mut chunk_compound_tag = CompoundTag::new();
 //! let mut level_compound_tag = CompoundTag::new();
 //!
@@ -133,16 +133,56 @@ impl From<io::Error> for ChunkSaveError {
     }
 }
 
-pub struct AnvilChunkProvider<'a> {
+pub fn chunk_coords_to_region_coords(chunk_x: i32, chunk_z: i32) -> (i32, i32) {
+    (chunk_x >> 5, chunk_z >> 5)
+}
+
+pub fn chunk_coords_inside_region(chunk_x: i32, chunk_z: i32) -> (u8, u8) {
+    ((chunk_x & 0x1F) as u8, (chunk_z & 0x1F) as u8)
+}
+
+#[derive(Debug)]
+pub struct RegionAndOffset {
+    region_x: i32,
+    region_z: i32,
+    region_chunk_x: u8,
+    region_chunk_z: u8,
+}
+
+impl RegionAndOffset {
+    fn from_chunk(chunk_x: i32, chunk_z: i32) -> Self {
+        let (region_x, region_z) = chunk_coords_to_region_coords(chunk_x, chunk_z);
+        let (region_chunk_x, region_chunk_z) = chunk_coords_inside_region(chunk_x, chunk_z);
+
+        Self {
+            region_x,
+            region_z,
+            region_chunk_x,
+            region_chunk_z
+        }
+    }
+}
+
+pub trait AnvilChunkProvider {
+    fn load_chunk(&self, chunk_x: i32, chunk_z: i32) -> Result<CompoundTag, ChunkLoadError>;
+    fn save_chunk(&self, chunk_x: i32, chunk_z: i32, chunk_compound_tag: CompoundTag) -> Result<(), ChunkSaveError>;
+}
+
+/// The chunks are saved in a folder (the default)
+pub struct FolderChunkProvider<'a> {
     /// Folder where region files located.
     folder_path: &'a Path,
 }
 
-impl<'a> AnvilChunkProvider<'a> {
+impl<'a> FolderChunkProvider<'a> {
     pub fn new(folder: &'a str) -> Self {
         let folder_path = Path::new(folder);
 
-        AnvilChunkProvider { folder_path }
+        FolderChunkProvider { folder_path }
+    }
+
+    pub fn region_name(region_x: i32, region_z: i32) -> String {
+        format!("r.{}.{}.mca", region_x, region_z)
     }
 
     /// Load chunks from the specified coordinates.
@@ -150,9 +190,9 @@ impl<'a> AnvilChunkProvider<'a> {
     /// # Example
     ///
     /// ```
-    /// use anvil_region::AnvilChunkProvider;
+    /// use anvil_region::FolderChunkProvider;
     ///
-    /// let chunk_provider = AnvilChunkProvider::new("test/region");
+    /// let chunk_provider = FolderChunkProvider::new("test/region");
     ///
     /// let chunk_compound_tag = chunk_provider.load_chunk(4, 2).unwrap();
     /// let level_compound_tag = chunk_compound_tag.get_compound_tag("Level").unwrap();
@@ -161,13 +201,14 @@ impl<'a> AnvilChunkProvider<'a> {
     /// assert_eq!(level_compound_tag.get_i32("zPos").unwrap(), 2);
     /// ```
     pub fn load_chunk(&self, chunk_x: i32, chunk_z: i32) -> Result<CompoundTag, ChunkLoadError> {
-        let region_x = chunk_x >> 5;
-        let region_z = chunk_z >> 5;
+        let RegionAndOffset {
+            region_x,
+            region_z,
+            region_chunk_x,
+            region_chunk_z,
+        } = RegionAndOffset::from_chunk(chunk_x, chunk_z);
 
-        let region_chunk_x = (chunk_x & 31) as u8;
-        let region_chunk_z = (chunk_z & 31) as u8;
-
-        let region_name = format!("r.{}.{}.mca", region_x, region_z);
+        let region_name = Self::region_name(region_x, region_z);
         let region_path = self.folder_path.join(region_name);
 
         if !region_path.exists() {
@@ -185,10 +226,10 @@ impl<'a> AnvilChunkProvider<'a> {
     /// # Example
     ///
     /// ```
-    /// use anvil_region::AnvilChunkProvider;
+    /// use anvil_region::FolderChunkProvider;
     /// use nbt::CompoundTag;
     ///
-    /// let chunk_provider = AnvilChunkProvider::new("test/region");
+    /// let chunk_provider = FolderChunkProvider::new("test/region");
     /// let mut chunk_compound_tag = CompoundTag::new();
     /// let mut level_compound_tag = CompoundTag::new();
     ///
@@ -211,19 +252,29 @@ impl<'a> AnvilChunkProvider<'a> {
             fs::create_dir(self.folder_path)?;
         }
 
-        let region_x = chunk_x >> 5;
-        let region_z = chunk_z >> 5;
+        let RegionAndOffset {
+            region_x,
+            region_z,
+            region_chunk_x,
+            region_chunk_z,
+        } = RegionAndOffset::from_chunk(chunk_x, chunk_z);
 
-        let region_chunk_x = (chunk_x & 31) as u8;
-        let region_chunk_z = (chunk_z & 31) as u8;
-
-        let region_name = format!("r.{}.{}.mca", region_x, region_z);
+        let region_name = Self::region_name(region_x, region_z);
         let region_path = self.folder_path.join(region_name);
 
         // TODO: Cache region files.
         let mut region = AnvilRegion::file(region_path)?;
 
         region.write_chunk(region_chunk_x, region_chunk_z, chunk_compound_tag)
+    }
+}
+
+impl<'a> AnvilChunkProvider for FolderChunkProvider<'a> {
+    fn load_chunk(&self, chunk_x: i32, chunk_z: i32) -> Result<CompoundTag, ChunkLoadError> {
+        self.load_chunk(chunk_x, chunk_z)
+    }
+    fn save_chunk(&self, chunk_x: i32, chunk_z: i32, chunk_compound_tag: CompoundTag) -> Result<(), ChunkSaveError> {
+        self.save_chunk(chunk_x, chunk_z, chunk_compound_tag)
     }
 }
 
@@ -570,7 +621,7 @@ impl<F: Seek+Read+Write> AnvilRegion<F> {
 mod tests {
     use super::*;
     use crate::{
-        AnvilChunkMetadata, AnvilChunkProvider, AnvilRegion, ChunkLoadError,
+        AnvilChunkMetadata, FolderChunkProvider, AnvilRegion, ChunkLoadError,
         REGION_HEADER_BYTES_LENGTH, REGION_SECTOR_BYTES_LENGTH,
     };
     use nbt::CompoundTag;
@@ -660,7 +711,7 @@ mod tests {
 
     #[test]
     fn test_load_chunk_no_folder() {
-        let chunk_provider = AnvilChunkProvider::new("no-folder");
+        let chunk_provider = FolderChunkProvider::new("no-folder");
         let load_error = chunk_provider.load_chunk(4, 4).err().unwrap();
 
         match load_error {
@@ -674,7 +725,7 @@ mod tests {
 
     #[test]
     fn test_load_chunk_no_region() {
-        let chunk_provider = AnvilChunkProvider::new("test/region");
+        let chunk_provider = FolderChunkProvider::new("test/region");
         let load_error = chunk_provider.load_chunk(100, 100).err().unwrap();
 
         match load_error {
@@ -688,7 +739,7 @@ mod tests {
 
     #[test]
     fn test_load_chunk_chunk_not_found() {
-        let chunk_provider = AnvilChunkProvider::new("test/region");
+        let chunk_provider = FolderChunkProvider::new("test/region");
         let load_error = chunk_provider.load_chunk(15, 14).err().unwrap();
 
         match load_error {
@@ -896,6 +947,64 @@ mod tests {
 
         assert_eq!(used_vec[0], 0b11011100);
         assert_eq!(used_vec[1], 0b10000000);
+    }
+
+    #[test]
+    fn test_chunk_to_region() {
+        // Chunk (0, 0) is in region (0, 0) at offset (0, 0)
+        match RegionAndOffset::from_chunk(0, 0) {
+            RegionAndOffset {
+                region_x: 0,
+                region_z: 0,
+                region_chunk_x: 0,
+                region_chunk_z: 0,
+            } => {}
+            x => panic!("{:?}", x),
+        }
+
+        // Chunk (0, 1) is in region (0, 0) at offset (0, 1)
+        match RegionAndOffset::from_chunk(0, 1) {
+            RegionAndOffset {
+                region_x: 0,
+                region_z: 0,
+                region_chunk_x: 0,
+                region_chunk_z: 1,
+            } => {}
+            x => panic!("{:?}", x),
+        }
+
+        // Chunk (0, -1) is in region (0, -1) at offset (0, 31)
+        match RegionAndOffset::from_chunk(0, -1) {
+            RegionAndOffset {
+                region_x: 0,
+                region_z: -1,
+                region_chunk_x: 0,
+                region_chunk_z: 31,
+            } => {}
+            x => panic!("{:?}", x),
+        }
+
+        // Chunk (30, -3) is in region (0, -1) at offset (30, 29)
+        match RegionAndOffset::from_chunk(30, -3) {
+            RegionAndOffset {
+                region_x: 0,
+                region_z: -1,
+                region_chunk_x: 30,
+                region_chunk_z: 29,
+            } => {}
+            x => panic!("{:?}", x),
+        }
+
+        // Chunk (70, -30) is in region (2, -1) at offset (6, 2)
+        match RegionAndOffset::from_chunk(70, -30) {
+            RegionAndOffset {
+                region_x: 2,
+                region_z: -1,
+                region_chunk_x: 6,
+                region_chunk_z: 2,
+            } => {}
+            x => panic!("{:?}", x),
+        }
     }
 
 }
