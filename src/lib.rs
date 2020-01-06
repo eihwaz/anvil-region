@@ -49,6 +49,11 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{fs, io};
 
+#[cfg(feature = "zip")]
+pub mod zip_chunk_provider;
+#[cfg(feature = "zip")]
+pub use zip_chunk_provider::*;
+
 /// Amount of chunks in region.
 const REGION_CHUNKS: usize = 1024;
 /// Length of chunks metadata in region.
@@ -133,20 +138,20 @@ impl From<io::Error> for ChunkSaveError {
     }
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct RegionAndOffset {
+    region_x: i32,
+    region_z: i32,
+    region_chunk_x: u8,
+    region_chunk_z: u8,
+}
+
 pub fn chunk_coords_to_region_coords(chunk_x: i32, chunk_z: i32) -> (i32, i32) {
     (chunk_x >> 5, chunk_z >> 5)
 }
 
 pub fn chunk_coords_inside_region(chunk_x: i32, chunk_z: i32) -> (u8, u8) {
     ((chunk_x & 0x1F) as u8, (chunk_z & 0x1F) as u8)
-}
-
-#[derive(Debug)]
-pub struct RegionAndOffset {
-    region_x: i32,
-    region_z: i32,
-    region_chunk_x: u8,
-    region_chunk_z: u8,
 }
 
 impl RegionAndOffset {
@@ -158,14 +163,19 @@ impl RegionAndOffset {
             region_x,
             region_z,
             region_chunk_x,
-            region_chunk_z
+            region_chunk_z,
         }
     }
 }
 
 pub trait AnvilChunkProvider {
-    fn load_chunk(&self, chunk_x: i32, chunk_z: i32) -> Result<CompoundTag, ChunkLoadError>;
-    fn save_chunk(&self, chunk_x: i32, chunk_z: i32, chunk_compound_tag: CompoundTag) -> Result<(), ChunkSaveError>;
+    fn load_chunk(&mut self, chunk_x: i32, chunk_z: i32) -> Result<CompoundTag, ChunkLoadError>;
+    fn save_chunk(
+        &mut self,
+        chunk_x: i32,
+        chunk_z: i32,
+        chunk_compound_tag: CompoundTag,
+    ) -> Result<(), ChunkSaveError>;
 }
 
 /// The chunks are saved in a folder (the default)
@@ -270,11 +280,16 @@ impl<'a> FolderChunkProvider<'a> {
 }
 
 impl<'a> AnvilChunkProvider for FolderChunkProvider<'a> {
-    fn load_chunk(&self, chunk_x: i32, chunk_z: i32) -> Result<CompoundTag, ChunkLoadError> {
-        self.load_chunk(chunk_x, chunk_z)
+    fn load_chunk(&mut self, chunk_x: i32, chunk_z: i32) -> Result<CompoundTag, ChunkLoadError> {
+        FolderChunkProvider::load_chunk(self, chunk_x, chunk_z)
     }
-    fn save_chunk(&self, chunk_x: i32, chunk_z: i32, chunk_compound_tag: CompoundTag) -> Result<(), ChunkSaveError> {
-        self.save_chunk(chunk_x, chunk_z, chunk_compound_tag)
+    fn save_chunk(
+        &mut self,
+        chunk_x: i32,
+        chunk_z: i32,
+        chunk_compound_tag: CompoundTag,
+    ) -> Result<(), ChunkSaveError> {
+        FolderChunkProvider::save_chunk(self, chunk_x, chunk_z, chunk_compound_tag)
     }
 }
 
@@ -321,8 +336,8 @@ impl AnvilChunkMetadata {
 }
 
 pub mod anvil_region {
-    use bitvec::prelude::*;
     use crate::AnvilChunkMetadata;
+    use bitvec::prelude::*;
 
     pub fn metadata_index(chunk_x: u8, chunk_z: u8) -> usize {
         assert!(32 > chunk_x, "Region chunk x coordinate out of bounds");
@@ -368,7 +383,7 @@ fn stream_len<S: Seek>(file: &mut S) -> Result<u64, io::Error> {
     Ok(len)
 }
 
-fn stream_set_len<S: Seek+Write>(file: &mut S, new_len: u64) -> Result<u64, io::Error> {
+fn stream_set_len<S: Seek + Write>(file: &mut S, new_len: u64) -> Result<u64, io::Error> {
     let old_pos = file.seek(SeekFrom::Current(0))?;
     let len = file.seek(SeekFrom::Start(new_len - 1))? + 1;
 
@@ -395,7 +410,7 @@ impl AnvilRegion<File> {
     }
 }
 
-impl<F: Seek+Read+Write> AnvilRegion<F> {
+impl<F: Seek + Read + Write> AnvilRegion<F> {
     pub fn new(mut file: F) -> Result<Self, io::Error> {
         // If necessary, extend the file length to the length of the header.
         if REGION_HEADER_BYTES_LENGTH > stream_len(&mut file)? {
@@ -621,7 +636,7 @@ impl<F: Seek+Read+Write> AnvilRegion<F> {
 mod tests {
     use super::*;
     use crate::{
-        AnvilChunkMetadata, FolderChunkProvider, AnvilRegion, ChunkLoadError,
+        AnvilChunkMetadata, AnvilRegion, ChunkLoadError, FolderChunkProvider,
         REGION_HEADER_BYTES_LENGTH, REGION_SECTOR_BYTES_LENGTH,
     };
     use nbt::CompoundTag;
@@ -952,59 +967,58 @@ mod tests {
     #[test]
     fn test_chunk_to_region() {
         // Chunk (0, 0) is in region (0, 0) at offset (0, 0)
-        match RegionAndOffset::from_chunk(0, 0) {
+        assert_eq!(
+            RegionAndOffset::from_chunk(0, 0),
             RegionAndOffset {
                 region_x: 0,
                 region_z: 0,
                 region_chunk_x: 0,
                 region_chunk_z: 0,
-            } => {}
-            x => panic!("{:?}", x),
-        }
+            }
+        );
 
         // Chunk (0, 1) is in region (0, 0) at offset (0, 1)
-        match RegionAndOffset::from_chunk(0, 1) {
+        assert_eq!(
+            RegionAndOffset::from_chunk(0, 1),
             RegionAndOffset {
                 region_x: 0,
                 region_z: 0,
                 region_chunk_x: 0,
                 region_chunk_z: 1,
-            } => {}
-            x => panic!("{:?}", x),
-        }
+            }
+        );
 
         // Chunk (0, -1) is in region (0, -1) at offset (0, 31)
-        match RegionAndOffset::from_chunk(0, -1) {
+        assert_eq!(
+            RegionAndOffset::from_chunk(0, -1),
             RegionAndOffset {
                 region_x: 0,
                 region_z: -1,
                 region_chunk_x: 0,
                 region_chunk_z: 31,
-            } => {}
-            x => panic!("{:?}", x),
-        }
+            }
+        );
 
         // Chunk (30, -3) is in region (0, -1) at offset (30, 29)
-        match RegionAndOffset::from_chunk(30, -3) {
+        assert_eq!(
+            RegionAndOffset::from_chunk(30, -3),
             RegionAndOffset {
                 region_x: 0,
                 region_z: -1,
                 region_chunk_x: 30,
                 region_chunk_z: 29,
-            } => {}
-            x => panic!("{:?}", x),
-        }
+            }
+        );
 
         // Chunk (70, -30) is in region (2, -1) at offset (6, 2)
-        match RegionAndOffset::from_chunk(70, -30) {
+        assert_eq!(
+            RegionAndOffset::from_chunk(70, -30),
             RegionAndOffset {
                 region_x: 2,
                 region_z: -1,
                 region_chunk_x: 6,
                 region_chunk_z: 2,
-            } => {}
-            x => panic!("{:?}", x),
-        }
+            }
+        );
     }
-
 }
