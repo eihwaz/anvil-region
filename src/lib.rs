@@ -288,7 +288,7 @@ impl AnvilRegion {
         }
 
         let chunks_metadata = Self::read_header(&mut file)?;
-        let total_sectors = file.metadata()?.len() as u32 / REGION_SECTOR_BYTES_LENGTH as u32;
+        let total_sectors = (file.metadata()?.len() as u32 + (REGION_SECTOR_BYTES_LENGTH as u32 - 1)) / REGION_SECTOR_BYTES_LENGTH as u32;
         let used_sectors = Self::used_sectors(total_sectors, &chunks_metadata);
 
         let region = AnvilRegion {
