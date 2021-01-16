@@ -10,9 +10,19 @@
 //! use anvil_region::provider::{FolderRegionProvider, RegionProvider};
 //!
 //! let provider = FolderRegionProvider::new("test/region");
-//! let mut region = provider.get_region(0, 0).unwrap();
 //!
-//! let chunk_compound_tag = region.read_chunk(4, 2).unwrap();
+//! let chunk_x = 4;
+//! let chunk_z = 2;
+//!
+//! let region_x = chunk_x >> 31;
+//! let region_z = chunk_z >> 31;
+//!
+//! let region_chunk_x = (chunk_x & 31) as u8;
+//! let region_chunk_z = (chunk_z & 31) as u8;
+//!
+//! let mut region = provider.get_region(region_x, region_z).unwrap();
+//!
+//! let chunk_compound_tag = region.read_chunk(region_chunk_x, region_chunk_z).unwrap();
 //! let level_compound_tag = chunk_compound_tag.get_compound_tag("Level").unwrap();
 //!
 //! assert_eq!(level_compound_tag.get_i32("xPos").unwrap(), 4);
@@ -26,7 +36,17 @@
 //! use nbt::CompoundTag;
 //!
 //! let provider = FolderRegionProvider::new("test/region");
-//! let mut region = provider.get_region(0, 0).unwrap();
+//!
+//! let chunk_x = 31;
+//! let chunk_z = 16;
+//!
+//! let region_x = chunk_x >> 31;
+//! let region_z = chunk_z >> 31;
+//!
+//! let region_chunk_x = (chunk_x & 31) as u8;
+//! let region_chunk_z = (chunk_z & 31) as u8;
+//!
+//! let mut region = provider.get_region(region_x, region_z).unwrap();
 //!
 //! let mut chunk_compound_tag = CompoundTag::new();
 //! let mut level_compound_tag = CompoundTag::new();
@@ -38,7 +58,7 @@
 //!
 //! chunk_compound_tag.insert_compound_tag("Level", level_compound_tag);
 //!
-//! region.write_chunk(31, 16, chunk_compound_tag);
+//! region.write_chunk(region_chunk_x, region_chunk_z, chunk_compound_tag);
 //! ```
 pub mod error;
 pub mod provider;

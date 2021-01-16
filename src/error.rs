@@ -5,7 +5,10 @@ use std::io;
 #[derive(Debug)]
 pub enum ChunkReadError {
     /// Chunk at specified coordinates inside region not found.
-    ChunkNotFound { chunk_x: u8, chunk_z: u8 },
+    ChunkNotFound {
+        region_chunk_x: u8,
+        region_chunk_z: u8,
+    },
     /// Chunk length overlaps declared maximum.
     ///
     /// This should not occur under normal conditions.

@@ -41,16 +41,22 @@ pub struct Region<S> {
 
 impl<S> Region<S> {
     /// Returns chunk metadata at specified coordinates.
-    fn get_metadata(&self, chunk_x: u8, chunk_z: u8) -> ChunkMetadata {
-        self.chunks_metadata[metadata_index(chunk_x, chunk_z)]
+    fn get_metadata(&self, region_chunk_x: u8, region_chunk_z: u8) -> ChunkMetadata {
+        self.chunks_metadata[metadata_index(region_chunk_x, region_chunk_z)]
     }
 }
 
-fn metadata_index(chunk_x: u8, chunk_z: u8) -> usize {
-    debug_assert!(32 > chunk_x, "Region chunk x coordinate out of bounds");
-    debug_assert!(32 > chunk_z, "Region chunk y coordinate out of bounds");
+fn metadata_index(region_chunk_x: u8, region_chunk_z: u8) -> usize {
+    debug_assert!(
+        32 > region_chunk_x,
+        "Region chunk x coordinate out of bounds"
+    );
+    debug_assert!(
+        32 > region_chunk_z,
+        "Region chunk y coordinate out of bounds"
+    );
 
-    chunk_x as usize + chunk_z as usize * 32
+    region_chunk_x as usize + region_chunk_z as usize * 32
 }
 
 /// Calculates used sectors.
@@ -102,11 +108,18 @@ impl<S: Read + Seek> Region<S> {
         Ok(region)
     }
 
-    pub fn read_chunk(&mut self, chunk_x: u8, chunk_z: u8) -> Result<CompoundTag, ChunkReadError> {
-        let metadata = self.get_metadata(chunk_x, chunk_z);
+    pub fn read_chunk(
+        &mut self,
+        region_chunk_x: u8,
+        region_chunk_z: u8,
+    ) -> Result<CompoundTag, ChunkReadError> {
+        let metadata = self.get_metadata(region_chunk_x, region_chunk_z);
 
         if metadata.is_empty() {
-            return Err(ChunkReadError::ChunkNotFound { chunk_x, chunk_z });
+            return Err(ChunkReadError::ChunkNotFound {
+                region_chunk_x,
+                region_chunk_z,
+            });
         }
 
         let seek_offset = metadata.start_sector_index as u64 * REGION_SECTOR_BYTES_LENGTH as u64;
@@ -171,8 +184,8 @@ impl<S: Read + Seek> Region<S> {
 impl<S: Write + Seek> Region<S> {
     pub fn write_chunk(
         &mut self,
-        chunk_x: u8,
-        chunk_z: u8,
+        region_chunk_x: u8,
+        region_chunk_z: u8,
         chunk_compound_tag: CompoundTag,
     ) -> Result<(), ChunkWriteError> {
         let mut buffer = Vec::new();
@@ -193,7 +206,7 @@ impl<S: Write + Seek> Region<S> {
             return Err(ChunkWriteError::LengthExceedsMaximum { length });
         }
 
-        let mut metadata = self.find_place(chunk_x, chunk_z, length)?;
+        let mut metadata = self.find_place(region_chunk_x, region_chunk_z, length)?;
         let seek_offset = metadata.start_sector_index as u64 * REGION_SECTOR_BYTES_LENGTH as u64;
 
         self.source.seek(SeekFrom::Start(seek_offset))?;
@@ -208,7 +221,7 @@ impl<S: Write + Seek> Region<S> {
         }
 
         metadata.update_last_modified_timestamp();
-        self.update_metadata(chunk_x, chunk_z, metadata)?;
+        self.update_metadata(region_chunk_x, region_chunk_z, metadata)?;
 
         Ok(())
     }
@@ -218,19 +231,19 @@ impl<S: Write + Seek> Region<S> {
     /// If cannot find a place to put chunk data will extend source.
     fn find_place(
         &mut self,
-        chunk_x: u8,
-        chunk_z: u8,
+        region_chunk_x: u8,
+        region_chunk_z: u8,
         chunk_length: u32,
     ) -> Result<ChunkMetadata, io::Error> {
         let sectors_required = (chunk_length / REGION_SECTOR_BYTES_LENGTH as u32) as u8 + 1;
-        let metadata = self.get_metadata(chunk_x, chunk_z);
+        let metadata = self.get_metadata(region_chunk_x, region_chunk_z);
 
         // Chunk still fits in the old place.
         if metadata.sectors == sectors_required {
             debug!(
                 target: "anvil-region",
                 "Region x: {}, z: {} chunk x: {}, z: {} with length {} still fits in the old place",
-                self.x, self.z, chunk_x, chunk_z, chunk_length
+                self.x, self.z, region_chunk_x, region_chunk_z, chunk_length
             );
 
             return Ok(metadata);
@@ -274,8 +287,8 @@ impl<S: Write + Seek> Region<S> {
                     can be placed in free sectors gap between from {} to {}",
                     self.x,
                     self.z,
-                    chunk_x,
-                    chunk_z,
+                    region_chunk_x,
+                    region_chunk_z,
                     sectors_required,
                     put_sector_index,
                     sector_index
@@ -314,11 +327,11 @@ impl<S: Write + Seek> Region<S> {
     /// Updates chunk metadata.
     fn update_metadata(
         &mut self,
-        chunk_x: u8,
-        chunk_z: u8,
+        region_chunk_x: u8,
+        region_chunk_z: u8,
         metadata: ChunkMetadata,
     ) -> Result<(), io::Error> {
-        let metadata_index = metadata_index(chunk_x, chunk_z);
+        let metadata_index = metadata_index(region_chunk_x, region_chunk_z);
         self.chunks_metadata[metadata_index] = metadata;
 
         let start_seek_offset = SeekFrom::Start((metadata_index * 4) as u64);
@@ -461,12 +474,15 @@ mod tests {
     fn test_read_chunk_not_found() {
         let file = File::open("test/empty_region.mca").unwrap();
         let mut region = Region::load(0, 0, file).unwrap();
-        let load_error = region.read_chunk(0, 0).err().unwrap();
+        let load_error = region.read_chunk(14, 12).err().unwrap();
 
         match load_error {
-            ChunkReadError::ChunkNotFound { chunk_x, chunk_z } => {
-                assert_eq!(chunk_x, 0);
-                assert_eq!(chunk_z, 0);
+            ChunkReadError::ChunkNotFound {
+                region_chunk_x,
+                region_chunk_z,
+            } => {
+                assert_eq!(region_chunk_x, 14);
+                assert_eq!(region_chunk_z, 12);
             }
             _ => panic!("Expected `ChunkNotFound` but got `{:?}`", load_error),
         }
