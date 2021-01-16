@@ -20,11 +20,12 @@ anvil-region = "0.4"
 #### Read
 
 ```rust
-use anvil_region::AnvilChunkProvider;
+use anvil_region::provider::{FolderRegionProvider, RegionProvider};
 
-let chunk_provider = AnvilChunkProvider::new("test/region");
+let provider = FolderRegionProvider::new("test/region");
+let mut region = provider.get_region(0, 0).unwrap();
 
-let chunk_compound_tag = chunk_provider.load_chunk(4, 2).unwrap();
+let chunk_compound_tag = region.read_chunk(4, 2).unwrap();
 let level_compound_tag = chunk_compound_tag.get_compound_tag("Level").unwrap();
 
 assert_eq!(level_compound_tag.get_i32("xPos").unwrap(), 4);
@@ -34,10 +35,12 @@ assert_eq!(level_compound_tag.get_i32("zPos").unwrap(), 2);
 #### Write
 
 ```rust
-use anvil_region::AnvilChunkProvider;
+use anvil_region::provider::{FolderRegionProvider, RegionProvider};
 use nbt::CompoundTag;
 
-let chunk_provider = AnvilChunkProvider::new("test/region");
+let provider = FolderRegionProvider::new("test/region");
+let mut region = provider.get_region(0, 0).unwrap();
+
 let mut chunk_compound_tag = CompoundTag::new();
 let mut level_compound_tag = CompoundTag::new();
 
@@ -48,5 +51,5 @@ level_compound_tag.insert_i32("zPos", 16);
 
 chunk_compound_tag.insert_compound_tag("Level", level_compound_tag);
 
-chunk_provider.save_chunk(31, 16, chunk_compound_tag);
+region.write_chunk(31, 16, chunk_compound_tag);
 ```
