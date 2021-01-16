@@ -83,10 +83,41 @@ fn used_sectors(total_sectors: usize, chunks_metadata: &[ChunkMetadata]) -> BitV
     used_sectors
 }
 
+/// First 8KB of source are header of 1024 offsets and 1024 timestamps.
+fn read_header<S: Read>(
+    source: &mut S,
+    source_len: u64,
+) -> Result<[ChunkMetadata; REGION_CHUNKS], io::Error> {
+    let mut chunks_metadata = [Default::default(); REGION_CHUNKS];
+
+    if REGION_HEADER_BYTES_LENGTH > source_len {
+        return Ok(chunks_metadata);
+    }
+
+    let mut values = [0u32; REGION_CHUNKS_METADATA_LENGTH];
+
+    for index in 0..REGION_CHUNKS_METADATA_LENGTH {
+        values[index] = source.read_u32::<BigEndian>()?;
+    }
+
+    for index in 0..REGION_CHUNKS {
+        let last_modified_timestamp = values[REGION_CHUNKS + index];
+        let offset = values[index];
+
+        let start_sector_index = offset >> 8;
+        let sectors = (offset & 0xFF) as u8;
+
+        let metadata = ChunkMetadata::new(start_sector_index, sectors, last_modified_timestamp);
+        chunks_metadata[index] = metadata;
+    }
+
+    return Ok(chunks_metadata);
+}
+
 impl<S: Read + Seek> Region<S> {
     pub fn load(x: i32, z: i32, mut source: S) -> Result<Self, io::Error> {
         let source_len = source.len()?;
-        let chunks_metadata = Self::read_header(&mut source, source_len)?;
+        let chunks_metadata = read_header(&mut source, source_len)?;
 
         let total_sectors = if source_len > REGION_HEADER_BYTES_LENGTH {
             (source_len as usize + (REGION_SECTOR_BYTES_LENGTH as usize - 1))
@@ -147,37 +178,6 @@ impl<S: Read + Seek> Region<S> {
             ZLIB_COMPRESSION_TYPE => Ok(read_zlib_compound_tag(&mut cursor)?),
             _ => Err(ChunkReadError::UnsupportedCompressionScheme { compression_scheme }),
         }
-    }
-
-    /// First 8KB of source are header of 1024 offsets and 1024 timestamps.
-    fn read_header(
-        source: &mut S,
-        source_len: u64,
-    ) -> Result<[ChunkMetadata; REGION_CHUNKS], io::Error> {
-        let mut chunks_metadata = [Default::default(); REGION_CHUNKS];
-
-        if REGION_HEADER_BYTES_LENGTH > source_len {
-            return Ok(chunks_metadata);
-        }
-
-        let mut values = [0u32; REGION_CHUNKS_METADATA_LENGTH];
-
-        for index in 0..REGION_CHUNKS_METADATA_LENGTH {
-            values[index] = source.read_u32::<BigEndian>()?;
-        }
-
-        for index in 0..REGION_CHUNKS {
-            let last_modified_timestamp = values[REGION_CHUNKS + index];
-            let offset = values[index];
-
-            let start_sector_index = offset >> 8;
-            let sectors = (offset & 0xFF) as u8;
-
-            let metadata = ChunkMetadata::new(start_sector_index, sectors, last_modified_timestamp);
-            chunks_metadata[index] = metadata;
-        }
-
-        return Ok(chunks_metadata);
     }
 }
 
@@ -431,8 +431,8 @@ mod tests {
     use crate::error::ChunkReadError;
     use crate::region;
     use crate::region::{
-        metadata_index, ChunkMetadata, Region, SeekExt, SeekWriteExt, REGION_HEADER_BYTES_LENGTH,
-        REGION_SECTOR_BYTES_LENGTH,
+        metadata_index, read_header, ChunkMetadata, Region, SeekExt, SeekWriteExt,
+        REGION_HEADER_BYTES_LENGTH, REGION_SECTOR_BYTES_LENGTH,
     };
     use nbt::CompoundTag;
     use std::fs::File;
@@ -499,8 +499,7 @@ mod tests {
         region.update_metadata(15, 15, metadata).unwrap();
         region.source.set_position(0);
 
-        let chunks_metadata =
-            Region::read_header(&mut region.source, REGION_HEADER_BYTES_LENGTH).unwrap();
+        let chunks_metadata = read_header(&mut region.source, REGION_HEADER_BYTES_LENGTH).unwrap();
         let metadata_index = metadata_index(15, 15);
 
         // In memory metadata.
