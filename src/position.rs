@@ -26,7 +26,7 @@ pub struct RegionChunkPosition {
 impl RegionChunkPosition {
     pub fn new(x: u8, z: u8) -> RegionChunkPosition {
         debug_assert!(32 > x, "Region chunk x coordinate out of bounds");
-        debug_assert!(32 > z, "Region chunk y coordinate out of bounds");
+        debug_assert!(32 > z, "Region chunk z coordinate out of bounds");
 
         RegionChunkPosition { x, z }
     }
