@@ -1,4 +1,5 @@
 use crate::error::{ChunkReadError, ChunkWriteError};
+use crate::position::{RegionChunkPosition, RegionPosition};
 use bitvec::prelude::*;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use log::debug;
@@ -27,10 +28,8 @@ const ZLIB_COMPRESSION_TYPE: u8 = 2;
 
 /// Region represents a 32x32 group of chunks.
 pub struct Region<S> {
-    /// X-axis coordinate.
-    x: i32,
-    /// Z-axis coordinate.
-    z: i32,
+    /// Region position in the world.
+    position: RegionPosition,
     /// Source in which region are stored.
     source: S,
     /// Array of chunks metadata.
@@ -41,22 +40,9 @@ pub struct Region<S> {
 
 impl<S> Region<S> {
     /// Returns chunk metadata at specified coordinates.
-    fn get_metadata(&self, region_chunk_x: u8, region_chunk_z: u8) -> ChunkMetadata {
-        self.chunks_metadata[metadata_index(region_chunk_x, region_chunk_z)]
+    fn get_metadata(&self, position: &RegionChunkPosition) -> ChunkMetadata {
+        self.chunks_metadata[position.metadata_index()]
     }
-}
-
-fn metadata_index(region_chunk_x: u8, region_chunk_z: u8) -> usize {
-    debug_assert!(
-        32 > region_chunk_x,
-        "Region chunk x coordinate out of bounds"
-    );
-    debug_assert!(
-        32 > region_chunk_z,
-        "Region chunk y coordinate out of bounds"
-    );
-
-    region_chunk_x as usize + region_chunk_z as usize * 32
 }
 
 /// Calculates used sectors.
@@ -115,7 +101,7 @@ fn read_header<S: Read>(
 }
 
 impl<S: Read + Seek> Region<S> {
-    pub fn load(x: i32, z: i32, mut source: S) -> Result<Self, io::Error> {
+    pub fn load(position: RegionPosition, mut source: S) -> Result<Self, io::Error> {
         let source_len = source.len()?;
         let chunks_metadata = read_header(&mut source, source_len)?;
 
@@ -129,8 +115,7 @@ impl<S: Read + Seek> Region<S> {
         let used_sectors = used_sectors(total_sectors, &chunks_metadata);
 
         let region = Region {
-            x,
-            z,
+            position,
             source,
             chunks_metadata,
             used_sectors,
@@ -141,16 +126,12 @@ impl<S: Read + Seek> Region<S> {
 
     pub fn read_chunk(
         &mut self,
-        region_chunk_x: u8,
-        region_chunk_z: u8,
+        position: RegionChunkPosition,
     ) -> Result<CompoundTag, ChunkReadError> {
-        let metadata = self.get_metadata(region_chunk_x, region_chunk_z);
+        let metadata = self.get_metadata(&position);
 
         if metadata.is_empty() {
-            return Err(ChunkReadError::ChunkNotFound {
-                region_chunk_x,
-                region_chunk_z,
-            });
+            return Err(ChunkReadError::ChunkNotFound { position });
         }
 
         let seek_offset = metadata.start_sector_index as u64 * REGION_SECTOR_BYTES_LENGTH as u64;
@@ -184,8 +165,7 @@ impl<S: Read + Seek> Region<S> {
 impl<S: Write + Seek> Region<S> {
     pub fn write_chunk(
         &mut self,
-        region_chunk_x: u8,
-        region_chunk_z: u8,
+        position: RegionChunkPosition,
         chunk_compound_tag: CompoundTag,
     ) -> Result<(), ChunkWriteError> {
         let mut buffer = Vec::new();
@@ -206,7 +186,7 @@ impl<S: Write + Seek> Region<S> {
             return Err(ChunkWriteError::LengthExceedsMaximum { length });
         }
 
-        let mut metadata = self.find_place(region_chunk_x, region_chunk_z, length)?;
+        let mut metadata = self.find_place(&position, length)?;
         let seek_offset = metadata.start_sector_index as u64 * REGION_SECTOR_BYTES_LENGTH as u64;
 
         self.source.seek(SeekFrom::Start(seek_offset))?;
@@ -221,7 +201,7 @@ impl<S: Write + Seek> Region<S> {
         }
 
         metadata.update_last_modified_timestamp();
-        self.update_metadata(region_chunk_x, region_chunk_z, metadata)?;
+        self.update_metadata(&position, metadata)?;
 
         Ok(())
     }
@@ -231,19 +211,18 @@ impl<S: Write + Seek> Region<S> {
     /// If cannot find a place to put chunk data will extend source.
     fn find_place(
         &mut self,
-        region_chunk_x: u8,
-        region_chunk_z: u8,
+        position: &RegionChunkPosition,
         chunk_length: u32,
     ) -> Result<ChunkMetadata, io::Error> {
         let sectors_required = (chunk_length / REGION_SECTOR_BYTES_LENGTH as u32) as u8 + 1;
-        let metadata = self.get_metadata(region_chunk_x, region_chunk_z);
+        let metadata = self.get_metadata(position);
 
         // Chunk still fits in the old place.
         if metadata.sectors == sectors_required {
             debug!(
                 target: "anvil-region",
                 "Region x: {}, z: {} chunk x: {}, z: {} with length {} still fits in the old place",
-                self.x, self.z, region_chunk_x, region_chunk_z, chunk_length
+                self.position.x, self.position.z, position.x, position.z, chunk_length
             );
 
             return Ok(metadata);
@@ -285,10 +264,10 @@ impl<S: Write + Seek> Region<S> {
                     target: "anvil-region",
                     "Region x: {}, z: {} chunk x: {}, z: {} with {} required sectors \
                     can be placed in free sectors gap between from {} to {}",
-                    self.x,
-                    self.z,
-                    region_chunk_x,
-                    region_chunk_z,
+                    self.position.x,
+                    self.position.z,
+                    position.x,
+                    position.z,
                     sectors_required,
                     put_sector_index,
                     sector_index
@@ -305,8 +284,8 @@ impl<S: Write + Seek> Region<S> {
         debug!(
             target: "anvil-region",
             "Extending region x: {}, z: {} source for {} bytes to place chunk data",
-            self.x,
-            self.z,
+            self.position.x,
+            self.position.z,
             extend_len
         );
 
@@ -327,11 +306,10 @@ impl<S: Write + Seek> Region<S> {
     /// Updates chunk metadata.
     fn update_metadata(
         &mut self,
-        region_chunk_x: u8,
-        region_chunk_z: u8,
+        position: &RegionChunkPosition,
         metadata: ChunkMetadata,
     ) -> Result<(), io::Error> {
-        let metadata_index = metadata_index(region_chunk_x, region_chunk_z);
+        let metadata_index = position.metadata_index();
         self.chunks_metadata[metadata_index] = metadata;
 
         let start_seek_offset = SeekFrom::Start((metadata_index * 4) as u64);
@@ -429,10 +407,11 @@ impl<S: Seek + Write> SeekWriteExt for S {
 #[cfg(test)]
 mod tests {
     use crate::error::ChunkReadError;
+    use crate::position::{RegionChunkPosition, RegionPosition};
     use crate::region;
     use crate::region::{
-        metadata_index, read_header, ChunkMetadata, Region, SeekExt, SeekWriteExt,
-        REGION_HEADER_BYTES_LENGTH, REGION_SECTOR_BYTES_LENGTH,
+        read_header, ChunkMetadata, Region, SeekExt, SeekWriteExt, REGION_HEADER_BYTES_LENGTH,
+        REGION_SECTOR_BYTES_LENGTH,
     };
     use nbt::CompoundTag;
     use std::fs::File;
@@ -449,7 +428,7 @@ mod tests {
         ];
 
         let file = File::open("test/region/r.0.0.mca").unwrap();
-        let region = Region::load(0, 0, file).unwrap();
+        let region = Region::load(RegionPosition::new(0, 0), file).unwrap();
 
         for (index, expected_chunk_metadata) in expected_data.iter().enumerate() {
             let chunk_metadata = region.chunks_metadata[256 + index];
@@ -461,9 +440,9 @@ mod tests {
     #[test]
     fn test_read_chunk() {
         let file = File::open("test/region/r.0.0.mca").unwrap();
-        let mut region = Region::load(0, 0, file).unwrap();
+        let mut region = Region::load(RegionPosition::new(0, 0), file).unwrap();
 
-        let compound_tag = region.read_chunk(15, 3).unwrap();
+        let compound_tag = region.read_chunk(RegionChunkPosition::new(15, 3)).unwrap();
         let level_tag = compound_tag.get_compound_tag("Level").unwrap();
 
         assert_eq!(level_tag.get_i32("xPos").unwrap(), 15);
@@ -473,16 +452,17 @@ mod tests {
     #[test]
     fn test_read_chunk_not_found() {
         let file = File::open("test/empty_region.mca").unwrap();
-        let mut region = Region::load(0, 0, file).unwrap();
-        let load_error = region.read_chunk(14, 12).err().unwrap();
+        let mut region = Region::load(RegionPosition::new(0, 0), file).unwrap();
+
+        let load_error = region
+            .read_chunk(RegionChunkPosition::new(14, 12))
+            .err()
+            .unwrap();
 
         match load_error {
-            ChunkReadError::ChunkNotFound {
-                region_chunk_x,
-                region_chunk_z,
-            } => {
-                assert_eq!(region_chunk_x, 14);
-                assert_eq!(region_chunk_z, 12);
+            ChunkReadError::ChunkNotFound { position } => {
+                assert_eq!(position.x, 14);
+                assert_eq!(position.z, 12);
             }
             _ => panic!("Expected `ChunkNotFound` but got `{:?}`", load_error),
         }
@@ -491,19 +471,23 @@ mod tests {
     #[test]
     fn test_update_metadata() {
         let cursor = Cursor::new(vec![0; REGION_HEADER_BYTES_LENGTH as usize]);
-        let mut region = Region::<Cursor<Vec<u8>>>::load(1, 1, cursor).unwrap();
+        let mut region = Region::load(RegionPosition::new(1, 1), cursor).unwrap();
 
         let mut metadata = ChunkMetadata::new(500, 10, 0);
         metadata.update_last_modified_timestamp();
 
-        region.update_metadata(15, 15, metadata).unwrap();
+        let position = RegionChunkPosition::new(15, 15);
+
+        region.update_metadata(&position, metadata).unwrap();
+
+        // Reset current cursor position.
         region.source.set_position(0);
 
         let chunks_metadata = read_header(&mut region.source, REGION_HEADER_BYTES_LENGTH).unwrap();
-        let metadata_index = metadata_index(15, 15);
+        let metadata_index = position.metadata_index();
 
         // In memory metadata.
-        assert_eq!(region.get_metadata(15, 15), metadata);
+        assert_eq!(region.get_metadata(&position), metadata);
         // Written to file metadata.
         assert_eq!(chunks_metadata[metadata_index], metadata);
     }
@@ -511,13 +495,15 @@ mod tests {
     #[test]
     fn test_write_chunk_with_source_extend() {
         let cursor = Cursor::new(Vec::new());
-        let mut region = Region::<Cursor<Vec<u8>>>::load(1, 1, cursor).unwrap();
+        let mut region = Region::load(RegionPosition::new(1, 1), cursor).unwrap();
 
         let mut write_compound_tag = CompoundTag::new();
         write_compound_tag.insert_bool("test_bool", true);
         write_compound_tag.insert_str("test_str", "test");
 
-        region.write_chunk(15, 15, write_compound_tag).unwrap();
+        region
+            .write_chunk(RegionChunkPosition::new(15, 15), write_compound_tag)
+            .unwrap();
 
         assert_eq!(
             region.source.len().unwrap(),
@@ -526,7 +512,7 @@ mod tests {
 
         assert_eq!(region.used_sectors.len(), 3);
 
-        let read_compound_tag = region.read_chunk(15, 15).unwrap();
+        let read_compound_tag = region.read_chunk(RegionChunkPosition::new(15, 15)).unwrap();
 
         assert!(read_compound_tag.get_bool("test_bool").unwrap());
         assert_eq!(read_compound_tag.get_str("test_str").unwrap(), "test");
@@ -535,20 +521,24 @@ mod tests {
     #[test]
     fn test_write_chunk_same_sector() {
         let cursor = Cursor::new(Vec::new());
-        let mut region = Region::<Cursor<Vec<u8>>>::load(1, 1, cursor).unwrap();
+        let mut region = Region::load(RegionPosition::new(1, 1), cursor).unwrap();
 
         let mut write_compound_tag_1 = CompoundTag::new();
         write_compound_tag_1.insert_bool("test_bool", true);
         write_compound_tag_1.insert_str("test_str", "test");
         write_compound_tag_1.insert_f32("test_f32", 1.23);
 
-        region.write_chunk(15, 15, write_compound_tag_1).unwrap();
+        region
+            .write_chunk(RegionChunkPosition::new(15, 15), write_compound_tag_1)
+            .unwrap();
 
         let mut write_compound_tag_2 = CompoundTag::new();
         write_compound_tag_2.insert_bool("test_bool", true);
         write_compound_tag_2.insert_str("test_str", "test");
 
-        region.write_chunk(15, 15, write_compound_tag_2).unwrap();
+        region
+            .write_chunk(RegionChunkPosition::new(15, 15), write_compound_tag_2)
+            .unwrap();
 
         assert_eq!(
             region.source.len().unwrap(),
@@ -557,7 +547,7 @@ mod tests {
 
         assert_eq!(region.used_sectors.len(), 3);
 
-        let read_compound_tag = region.read_chunk(15, 15).unwrap();
+        let read_compound_tag = region.read_chunk(RegionChunkPosition::new(15, 15)).unwrap();
 
         assert!(read_compound_tag.get_bool("test_bool").unwrap());
         assert_eq!(read_compound_tag.get_str("test_str").unwrap(), "test");
@@ -567,13 +557,15 @@ mod tests {
     #[test]
     fn test_write_chunk_same_sector_with_source_expand() {
         let cursor = Cursor::new(Vec::new());
-        let mut region = Region::<Cursor<Vec<u8>>>::load(1, 1, cursor).unwrap();
+        let mut region = Region::load(RegionPosition::new(1, 1), cursor).unwrap();
 
         let mut write_compound_tag_1 = CompoundTag::new();
         write_compound_tag_1.insert_bool("test_bool", true);
         write_compound_tag_1.insert_str("test_str", "test");
 
-        region.write_chunk(15, 15, write_compound_tag_1).unwrap();
+        region
+            .write_chunk(RegionChunkPosition::new(15, 15), write_compound_tag_1)
+            .unwrap();
 
         let mut write_compound_tag_2 = CompoundTag::new();
         let mut i32_vec = Vec::new();
@@ -586,7 +578,9 @@ mod tests {
 
         write_compound_tag_2.insert_i32_vec("test_i32_vec", i32_vec);
 
-        region.write_chunk(15, 15, write_compound_tag_2).unwrap();
+        region
+            .write_chunk(RegionChunkPosition::new(15, 15), write_compound_tag_2)
+            .unwrap();
 
         assert_eq!(
             region.source.len().unwrap(),
@@ -599,7 +593,7 @@ mod tests {
     #[test]
     fn test_write_chunk_with_insert_in_middle_gap() {
         let cursor = Cursor::new(Vec::new());
-        let mut region = Region::<Cursor<Vec<u8>>>::load(1, 1, cursor).unwrap();
+        let mut region = Region::load(RegionPosition::new(1, 1), cursor).unwrap();
 
         let mut write_compound_tag = CompoundTag::new();
         write_compound_tag.insert_bool("test_bool", true);
@@ -615,7 +609,9 @@ mod tests {
         let length = REGION_HEADER_BYTES_LENGTH + REGION_SECTOR_BYTES_LENGTH as u64 * 3;
         region.source.extend_len(length).unwrap();
 
-        region.write_chunk(15, 15, write_compound_tag).unwrap();
+        region
+            .write_chunk(RegionChunkPosition::new(15, 15), write_compound_tag)
+            .unwrap();
 
         for i in 0..5 {
             assert!(region.used_sectors.get(i).unwrap());
@@ -628,17 +624,22 @@ mod tests {
     #[test]
     fn test_write_chunk_not_enough_gap() {
         let cursor = Cursor::new(Vec::new());
-        let mut region = Region::<Cursor<Vec<u8>>>::load(1, 1, cursor).unwrap();
+        let mut region = Region::load(RegionPosition::new(1, 1), cursor).unwrap();
 
         let mut write_compound_tag_1 = CompoundTag::new();
         write_compound_tag_1.insert_bool("test_bool", true);
         write_compound_tag_1.insert_str("test_str", "test");
 
         region
-            .write_chunk(15, 15, write_compound_tag_1.clone())
+            .write_chunk(
+                RegionChunkPosition::new(15, 15),
+                write_compound_tag_1.clone(),
+            )
             .unwrap();
 
-        region.write_chunk(0, 0, write_compound_tag_1).unwrap();
+        region
+            .write_chunk(RegionChunkPosition::new(0, 0), write_compound_tag_1)
+            .unwrap();
 
         let mut write_compound_tag_2 = CompoundTag::new();
         let mut i32_vec = Vec::new();
@@ -651,7 +652,9 @@ mod tests {
 
         write_compound_tag_2.insert_i32_vec("test_i32_vec", i32_vec);
 
-        region.write_chunk(15, 15, write_compound_tag_2).unwrap();
+        region
+            .write_chunk(RegionChunkPosition::new(15, 15), write_compound_tag_2)
+            .unwrap();
 
         assert_eq!(region.used_sectors.clone().into_vec()[0], 0b00111011);
         assert_eq!(region.used_sectors.len(), 6);

@@ -1,3 +1,4 @@
+use crate::position::RegionChunkPosition;
 use nbt::decode::TagDecodeError;
 use std::io;
 
@@ -5,10 +6,7 @@ use std::io;
 #[derive(Debug)]
 pub enum ChunkReadError {
     /// Chunk at specified coordinates inside region not found.
-    ChunkNotFound {
-        region_chunk_x: u8,
-        region_chunk_z: u8,
-    },
+    ChunkNotFound { position: RegionChunkPosition },
     /// Chunk length overlaps declared maximum.
     ///
     /// This should not occur under normal conditions.
