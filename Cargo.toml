@@ -9,6 +9,7 @@ homepage = "https://github.com/eihwaz/anvil-region"
 repository = "https://github.com/eihwaz/anvil-region"
 keywords = ["minecraft", "region", "anvil", "io"]
 readme = "README.md"
+include = ["src/**/*", "LICENSE", "README.md", "test/*"]
 
 [dependencies]
 byteorder = "1.3"
