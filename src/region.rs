@@ -329,6 +329,38 @@ impl<S: Write + Seek> Region<S> {
     }
 }
 
+impl<S: Read + Seek> IntoIterator for Region<S> {
+    type Item = <RegionIterator<S> as Iterator>::Item;
+    type IntoIter = RegionIterator<S>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        RegionIterator{ inner: self, current: 0 }
+    }
+}
+
+pub struct RegionIterator<S: Read + Seek> {
+    inner: Region<S>,
+    current: usize
+}
+
+impl<S: Read + Seek> Iterator for RegionIterator<S> {
+    type Item = Result<CompoundTag, ChunkReadError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current == REGION_CHUNKS {
+            return None;
+        }
+
+        let x = self.current % 32;
+        let z = self.current / 32;
+
+        self.current += 1;
+
+        let pos = RegionChunkPosition::new(x as u8, z as u8);
+        Some(self.inner.read_chunk(pos))
+    }
+}
+
 /// Chunk metadata are stored in header.
 #[derive(Copy, Clone, Default, Debug, Eq, PartialEq)]
 struct ChunkMetadata {
@@ -465,6 +497,50 @@ mod tests {
                 assert_eq!(position.z, 12);
             }
             _ => panic!("Expected `ChunkNotFound` but got `{:?}`", load_error),
+        }
+    }
+
+    // ignore expensive test by default
+    #[ignore]
+    #[test]
+    fn test_iterate_region() {
+        let file = File::open("test/region/r.0.0.mca").unwrap();
+        let region = Region::load(RegionPosition::new(0, 0), file).unwrap();
+
+        let mut cnt = 0;
+        let mut hit = 0;
+
+        for compound_tag in region.into_iter() {
+            if let Ok(compound_tag) = compound_tag {
+                let level_tag = compound_tag.get_compound_tag("Level").unwrap();
+
+                if level_tag.get_i32("xPos").unwrap() == 15 &&
+                    level_tag.get_i32("zPos").unwrap() == 3 {
+                    hit = cnt;
+                }
+            }
+            cnt += 1;
+        }
+
+        assert_eq!(hit, 111)
+    }
+
+    // ignore expensive test by default
+    #[ignore]
+    #[test]
+    fn test_iterate_region_not_found() {
+        let file = File::open("test/region/r.0.0.mca").unwrap();
+        let region = Region::load(RegionPosition::new(0, 0), file).unwrap();
+
+        for compound_tag in region.into_iter() {
+            if let Ok(compound_tag) = compound_tag {
+                let level_tag = compound_tag.get_compound_tag("Level").unwrap();
+
+                if level_tag.get_i32("xPos").unwrap() == 28 &&
+                    level_tag.get_i32("zPos").unwrap() == 1 {
+                    panic!("this chunk should not be hit")
+                }
+            }
         }
     }
 
