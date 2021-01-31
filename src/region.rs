@@ -500,8 +500,6 @@ mod tests {
         }
     }
 
-    // ignore expensive test by default
-    #[ignore]
     #[test]
     fn test_iterate_region() {
         let file = File::open("test/region/r.0.0.mca").unwrap();
@@ -525,8 +523,6 @@ mod tests {
         assert_eq!(hit, 111)
     }
 
-    // ignore expensive test by default
-    #[ignore]
     #[test]
     fn test_iterate_region_not_found() {
         let file = File::open("test/region/r.0.0.mca").unwrap();
