@@ -344,7 +344,7 @@ pub struct RegionIterator<S: Read + Seek> {
 }
 
 impl<S: Read + Seek> Iterator for RegionIterator<S> {
-    type Item = Result<CompoundTag, ChunkReadError>;
+    type Item = CompoundTag;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.current == REGION_CHUNKS {
@@ -357,7 +357,10 @@ impl<S: Read + Seek> Iterator for RegionIterator<S> {
         self.current += 1;
 
         let pos = RegionChunkPosition::new(x as u8, z as u8);
-        Some(self.inner.read_chunk(pos))
+        match self.inner.read_chunk(pos) {
+            Ok(chunk) => Some(chunk),
+            Err(_) => self.next()
+        }
     }
 }
 
@@ -505,22 +508,18 @@ mod tests {
         let file = File::open("test/region/r.0.0.mca").unwrap();
         let region = Region::load(RegionPosition::new(0, 0), file).unwrap();
 
-        let mut cnt = 0;
-        let mut hit = 0;
+        let mut hit = false;
 
         for compound_tag in region.into_iter() {
-            if let Ok(compound_tag) = compound_tag {
-                let level_tag = compound_tag.get_compound_tag("Level").unwrap();
+            let level_tag = compound_tag.get_compound_tag("Level").unwrap();
 
-                if level_tag.get_i32("xPos").unwrap() == 15 &&
-                    level_tag.get_i32("zPos").unwrap() == 3 {
-                    hit = cnt;
-                }
+            if level_tag.get_i32("xPos").unwrap() == 15 &&
+                level_tag.get_i32("zPos").unwrap() == 3 {
+                hit = true;
             }
-            cnt += 1;
         }
 
-        assert_eq!(hit, 111)
+        assert_eq!(hit, true);
     }
 
     #[test]
@@ -529,14 +528,22 @@ mod tests {
         let region = Region::load(RegionPosition::new(0, 0), file).unwrap();
 
         for compound_tag in region.into_iter() {
-            if let Ok(compound_tag) = compound_tag {
-                let level_tag = compound_tag.get_compound_tag("Level").unwrap();
+            let level_tag = compound_tag.get_compound_tag("Level").unwrap();
 
-                if level_tag.get_i32("xPos").unwrap() == 28 &&
-                    level_tag.get_i32("zPos").unwrap() == 1 {
-                    panic!("this chunk should not be hit")
-                }
+            if level_tag.get_i32("xPos").unwrap() == 28 &&
+                level_tag.get_i32("zPos").unwrap() == 1 {
+                panic!("this chunk should not be hit")
             }
+        }
+    }
+
+    #[test]
+    fn test_iterate_region_empty() {
+        let file = File::open("test/empty_region.mca").unwrap();
+        let region = Region::load(RegionPosition::new(0, 0), file).unwrap();
+
+        for _compound_tag in region {
+            panic!("there should not be anything in there!")
         }
     }
 
