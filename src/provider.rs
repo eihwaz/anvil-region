@@ -1,6 +1,6 @@
 use crate::position::RegionPosition;
 use crate::region::Region;
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, read_dir};
 use std::path::Path;
 use std::{fs, io};
 
@@ -19,6 +19,17 @@ impl<'a> FolderRegionProvider<'a> {
 
         FolderRegionProvider { folder_path }
     }
+
+    // leave implementing this to the specific provider,
+    // makes function declaration bearable for now
+    pub fn iter(&self) -> Result<impl Iterator<Item=RegionPosition>, io::Error> {
+        let positions: Vec<_> = read_dir(self.folder_path)?
+            .filter_map(|dir| dir.ok())
+            .filter_map(|dir| RegionPosition::from_filename(&dir.path()).ok())
+            .collect();
+
+        Ok(positions.into_iter())
+    }
 }
 
 impl<'a> RegionProvider<File> for FolderRegionProvider<'a> {
@@ -27,7 +38,7 @@ impl<'a> RegionProvider<File> for FolderRegionProvider<'a> {
             fs::create_dir(self.folder_path)?;
         }
 
-        let region_name = format!("r.{}.{}.mca", position.x, position.z);
+        let region_name = position.filename();
         let region_path = self.folder_path.join(region_name);
 
         let file = OpenOptions::new()
