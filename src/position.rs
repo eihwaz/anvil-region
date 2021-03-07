@@ -1,8 +1,3 @@
-use std::path::PathBuf;
-use std::io;
-use std::str::FromStr;
-use std::num::ParseIntError;
-
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Copy, Clone)]
 pub struct RegionPosition {
     pub x: i32,
@@ -20,36 +15,6 @@ impl RegionPosition {
 
         RegionPosition::new(x, z)
     }
-
-    pub fn from_filename(path: &PathBuf) -> Result<RegionPosition, io::Error> {
-        // we can use lossy because of the bound check later
-        let filename = path.file_name().unwrap_or_default().to_string_lossy();
-
-        let parts: Vec<_> = filename.split('.').collect();
-
-        let (x, z) = parse_coords(parts).map_err(|_| io::ErrorKind::InvalidInput)?;
-
-        Ok(RegionPosition::new(x, z))
-    }
-
-    pub fn filename(self) -> String {
-        format!("r.{}.{}.mca", self.x, self.z)
-    }
-}
-
-fn parse_coords(parts: Vec<&str>) -> Result<(i32, i32), ParseIntError> {
-    let correct_format =
-        parts.len() != 4 ||
-            parts[0] != "r" ||
-            parts[3] != "mca";
-
-    if correct_format {
-        // to throw the error (cant instantiate from outside)
-        i32::from_str("")?;
-    }
-
-    Ok((i32::from_str(parts[1])?,
-        i32::from_str(parts[2])?))
 }
 
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Copy, Clone)]
@@ -75,29 +40,5 @@ impl RegionChunkPosition {
 
     pub(crate) fn metadata_index(&self) -> usize {
         self.x as usize + self.z as usize * 32
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-    use crate::position::RegionPosition;
-
-    #[test]
-    fn test_position_parse() {
-        let mut path = PathBuf::new();
-        path.set_file_name("r.0.0.mca");
-
-        let pos = RegionPosition::from_filename(&path).unwrap();
-        assert_eq!(RegionPosition{ x: 0, z: 0}, pos)
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_position_parse_invalid_format() {
-        let mut path = PathBuf::new();
-        path.set_file_name("this is not a valid region.filename");
-
-        RegionPosition::from_filename(&path).unwrap();
     }
 }
