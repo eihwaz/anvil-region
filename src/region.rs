@@ -177,7 +177,7 @@ impl<S: Write + Seek> Region<S> {
         }
 
         buffer.write_u8(ZLIB_COMPRESSION_TYPE)?;
-        write_zlib_compound_tag(&mut buffer, chunk_compound_tag)?;
+        write_zlib_compound_tag(&mut buffer, &chunk_compound_tag)?;
 
         // 4 bytes for data length.
         let length = (buffer.len() + 4) as u32;
@@ -334,13 +334,16 @@ impl<S: Read + Seek> IntoIterator for Region<S> {
     type IntoIter = RegionIterator<S>;
 
     fn into_iter(self) -> Self::IntoIter {
-        RegionIterator{ inner: self, current: 0 }
+        RegionIterator {
+            inner: self,
+            current: 0,
+        }
     }
 }
 
 pub struct RegionIterator<S: Read + Seek> {
     inner: Region<S>,
-    current: usize
+    current: usize,
 }
 
 impl<S: Read + Seek> Iterator for RegionIterator<S> {
@@ -359,7 +362,7 @@ impl<S: Read + Seek> Iterator for RegionIterator<S> {
         let pos = RegionChunkPosition::new(x as u8, z as u8);
         match self.inner.read_chunk(pos) {
             Ok(chunk) => Some(chunk),
-            Err(_) => self.next()
+            Err(_) => self.next(),
         }
     }
 }
@@ -513,8 +516,7 @@ mod tests {
         for compound_tag in region.into_iter() {
             let level_tag = compound_tag.get_compound_tag("Level").unwrap();
 
-            if level_tag.get_i32("xPos").unwrap() == 15 &&
-                level_tag.get_i32("zPos").unwrap() == 3 {
+            if level_tag.get_i32("xPos").unwrap() == 15 && level_tag.get_i32("zPos").unwrap() == 3 {
                 hit = true;
             }
         }
@@ -530,8 +532,7 @@ mod tests {
         for compound_tag in region.into_iter() {
             let level_tag = compound_tag.get_compound_tag("Level").unwrap();
 
-            if level_tag.get_i32("xPos").unwrap() == 28 &&
-                level_tag.get_i32("zPos").unwrap() == 1 {
+            if level_tag.get_i32("xPos").unwrap() == 28 && level_tag.get_i32("zPos").unwrap() == 1 {
                 panic!("this chunk should not be hit")
             }
         }
