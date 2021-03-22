@@ -1,6 +1,6 @@
 use crate::position::RegionChunkPosition;
 use nbt::decode::TagDecodeError;
-use std::io;
+use std::{error::Error, fmt::Display, io};
 
 /// Possible errors while loading the chunk.
 #[derive(Debug)]
@@ -49,6 +49,41 @@ impl From<TagDecodeError> for ChunkReadError {
     }
 }
 
+impl Error for ChunkReadError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        use ChunkReadError::*;
+        match self {
+            IOError { io_error } => Some(io_error),
+            TagDecodeError { tag_decode_error } => Some(tag_decode_error),
+            _ => None,
+        }
+    }
+}
+
+impl Display for ChunkReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use ChunkReadError::*;
+        match self {
+            ChunkNotFound { position } => {
+                write!(f, "Chunk {}, {} not found", position.x, position.z)
+            }
+            LengthExceedsMaximum {
+                length,
+                maximum_length,
+            } => write!(
+                f,
+                "Chunk lenght of {} exceeds maximum ({})",
+                length, maximum_length
+            ),
+            UnsupportedCompressionScheme { compression_scheme } => {
+                write!(f, "Unsupported compression scheme: {}", compression_scheme)
+            }
+            IOError { .. } => write!(f, "IO Error"),
+            TagDecodeError { .. } => write!(f, "Failed to decode nbt"),
+        }
+    }
+}
+
 /// Possible errors while saving the chunk.
 #[derive(Debug)]
 pub enum ChunkWriteError {
@@ -66,5 +101,26 @@ pub enum ChunkWriteError {
 impl From<io::Error> for ChunkWriteError {
     fn from(io_error: io::Error) -> Self {
         ChunkWriteError::IOError { io_error }
+    }
+}
+
+impl Error for ChunkWriteError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            ChunkWriteError::IOError { io_error } => Some(io_error),
+            _ => None,
+        }
+    }
+}
+
+impl Display for ChunkWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use ChunkWriteError::*;
+        match self {
+            LengthExceedsMaximum { length } => {
+                write!(f, "Chunk lenght of {} exceeds maximum (1mb)", length)
+            }
+            IOError { .. } => write!(f, "IO Error"),
+        }
     }
 }
